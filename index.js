@@ -3,17 +3,23 @@ const TelegramBot = require('node-telegram-bot-api');
 const OpenAI = require('openai');
 const fs = require('fs').promises;
 const path = require('path');
+const Database = require('better-sqlite3');
+
+// Initialize the database - This is the single source of truth now
+const db = new Database('grandma.db');
+console.log('Database connected successfully.');
 
 // Kill any existing bot instances first
 process.on('SIGINT', () => {
   console.log('Shutting down gracefully...');
+  db.close(); // Close the database connection
   process.exit(0);
 });
 
-// Initialize - IMPORTANT: Set polling to false first, then start
-const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { 
+// Initialize Telegram Bot
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, {
   polling: false,
-  filepath: false 
+  filepath: false
 });
 
 // Clear any webhooks and start polling
@@ -27,58 +33,64 @@ bot.deleteWebHook().then(() => {
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Storage
-const TASKS_FILE = 'tasks.json';
-const CONTEXT_FILE = 'context.json';
-const KNOWLEDGE_FILE = 'knowledge.json';
+// --- Database Initialization ---
+function initStorage() {
+  console.log('Initializing database schema...');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      who TEXT,
+      when_text TEXT,
+      where_text TEXT,
+      importance TEXT DEFAULT 'normal',
+      category TEXT DEFAULT 'general',
+      createdBy TEXT,
+      createdAt TEXT NOT NULL,
+      completed INTEGER DEFAULT 0,
+      completedAt TEXT,
+      completedBy TEXT
+    );
 
-// Initialize storage
-async function initStorage() {
-  const files = [
-    { path: TASKS_FILE, default: { tasks: [], taskIdCounter: 1 } },
-    { path: CONTEXT_FILE, default: { messages: [] } },
-    { path: KNOWLEDGE_FILE, default: { 
-      people: {}, 
-      preferences: {},
-      patterns: {},
-      lastCleanup: new Date().toISOString()
-    }}
-  ];
+    CREATE TABLE IF NOT EXISTS conversation_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp TEXT NOT NULL,
+      person TEXT,
+      personId INTEGER,
+      said TEXT,
+      chatId INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS knowledge (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
+  `);
   
-  for (const file of files) {
-    try {
-      await fs.access(file.path);
-      const data = await fs.readFile(file.path, 'utf8');
-      JSON.parse(data); // Validate
-    } catch {
-      console.log(`Creating ${file.path}...`);
-      await fs.writeFile(file.path, JSON.stringify(file.default, null, 2));
-    }
-  }
+  // Ensure lastCleanup date exists
+  const stmt = db.prepare(`INSERT OR IGNORE INTO knowledge (key, value) VALUES (?, ?)`);
+  stmt.run('lastCleanup', new Date(0).toISOString());
+  console.log('Database schema is ready.');
 }
 
-// Load/Save helpers
-async function loadJSON(filename, fallback = {}) {
-  try {
-    const data = await fs.readFile(filename, 'utf8');
-    return JSON.parse(data);
-  } catch {
-    return fallback;
-  }
-}
-
-async function saveJSON(filename, data) {
-  await fs.writeFile(filename, JSON.stringify(data, null, 2));
-}
-
-// Grandma's memory system
+// --- Grandma's Memory System (Now with DB persistence) ---
 class GrandmaMemory {
   constructor() {
-    this.shortTermMemory = []; // Recent conversation
-    this.workingMemory = {};   // Current conversation state
+    this.shortTermMemory = []; // In-memory cache for recent conversation
+  }
+
+  // Load history from DB into memory on startup
+  hydrate() {
+    const rows = db.prepare(`
+      SELECT person, said FROM conversation_history 
+      ORDER BY timestamp DESC LIMIT 20
+    `).all().reverse(); // .reverse() to get chronological order
+
+    this.shortTermMemory = rows.map(r => ({ person: r.person, said: r.said }));
+    console.log(`Hydrated ${this.shortTermMemory.length} messages into memory.`);
   }
   
-  async remember(msg) {
+  remember(msg) {
     const memory = {
       time: new Date().toISOString(),
       person: msg.from.first_name || msg.from.username,
@@ -87,17 +99,18 @@ class GrandmaMemory {
       chatId: msg.chat.id
     };
     
-    this.shortTermMemory.push(memory);
+    // Update in-memory cache
+    this.shortTermMemory.push({ person: memory.person, said: memory.said });
     if (this.shortTermMemory.length > 20) {
       this.shortTermMemory.shift();
     }
     
-    // Update context file (for restart persistence)
-    const context = await loadJSON(CONTEXT_FILE);
-    context.messages = this.shortTermMemory;
-    await saveJSON(CONTEXT_FILE, context);
-    
-    return memory;
+    // Persist to database
+    const stmt = db.prepare(`
+      INSERT INTO conversation_history (timestamp, person, personId, said, chatId)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    stmt.run(memory.time, memory.person, memory.personId, memory.said, memory.chatId);
   }
   
   getConversationContext() {
@@ -105,20 +118,26 @@ class GrandmaMemory {
       `${m.person}: ${m.said}`
     ).join('\n');
   }
-  
-  async updateKnowledge(person, info) {
-    const knowledge = await loadJSON(KNOWLEDGE_FILE);
-    if (!knowledge.people[person]) {
-      knowledge.people[person] = {};
-    }
-    Object.assign(knowledge.people[person], info);
-    await saveJSON(KNOWLEDGE_FILE, knowledge);
+
+  updateKnowledge(person, info) {
+    // For this simple case, we can store structured info as JSON in the knowledge table
+    const key = `person_${person}`;
+    const existing = db.prepare('SELECT value FROM knowledge WHERE key = ?').get(key);
+    const existingInfo = existing ? JSON.parse(existing.value) : {};
+    const newInfo = { ...existingInfo, ...info };
+    
+    db.prepare(`
+      INSERT INTO knowledge (key, value) VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(key, JSON.stringify(newInfo));
   }
 }
 
 const grandma = new GrandmaMemory();
 
-// Main message handler - Grandma always responds!
+// --- Main Logic ---
+
+// Main message handler
 bot.on('message', async (msg) => {
   if (msg.from.is_bot) return;
   if (!msg.text) return;
@@ -126,27 +145,22 @@ bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const person = msg.from.first_name || msg.from.username || 'child';
   
-  // Remember everything
-  await grandma.remember(msg);
+  grandma.remember(msg);
   
   try {
-    // Let Grandma think
     bot.sendChatAction(chatId, 'typing');
     const response = await processWithGrandmaWisdom(msg.text, person, grandma.getConversationContext());
     
-    // Always respond
     if (response.message) {
       await bot.sendMessage(chatId, response.message);
     }
     
-    // Handle tasks
-    if (response.tasks.length > 0) {
-      await processTasks(response.tasks, person);
+    if (response.tasks && response.tasks.length > 0) {
+      processTasks(response.tasks, person);
     }
     
-    // Handle task operations
-    if (response.operations.length > 0) {
-      await processOperations(response.operations, person, chatId);
+    if (response.operations && response.operations.length > 0) {
+      processOperations(response.operations, person, chatId);
     }
     
   } catch (error) {
@@ -157,12 +171,10 @@ bot.on('message', async (msg) => {
 
 // Grandma's wisdom processor
 async function processWithGrandmaWisdom(text, person, context) {
-  const tasks = await loadJSON(TASKS_FILE);
-  const activeTasks = tasks.tasks.filter(t => !t.completed);
+  const activeTasks = db.prepare('SELECT title, who, when_text, where_text FROM tasks WHERE completed = 0').all();
   
   const prompt = `
-You are a wise, street-smart grandma with wisdom who keeps an impeccable household. You're extremely to the point and direct.
-Sometimes you offer sweet encouragement. 
+You are a wise, street-smart grandma who keeps an impeccable household. You're extremely brief and direct.
 
 RECENT CONVERSATION:
 ${context}
@@ -171,356 +183,257 @@ CURRENT MESSAGE from ${person}: "${text}"
 
 ACTIVE TASKS (${activeTasks.length} total):
 ${activeTasks.slice(0, 10).map(t => 
-  `- ${t.title} (${t.who || 'someone'} needs to do this${t.when ? ' ' + t.when : ''}${t.where ? ' at ' + t.where : ''})`
+  `- ${t.title} (${t.who || 'someone'} needs to do this${t.when_text ? ' ' + t.when_text : ''}${t.where_text ? ' at ' + t.where_text : ''})`
 ).join('\n')}
 
 YOUR RULES:
-1. BRIEF responses (5-10 words max) unless user asks for list or more input such as order of task
+1. ULTRA BRIEF responses (5-10 words max)
 2. When adding tasks, just confirm briefly: "Got it." or "Noted."
-3. Respond in a humanlike fashion using the to do items appropriately 
+3. NO explanations, NO emojis, NO elaboration
 4. If "delete all" or "clear everything" → remove ALL tasks
 5. List formatting: use "|" between items
-6. for Jeremy reward completions by explaining a debate trick like "straw man" or "tu quoque"
-7. for Moana share a cute animal knowledge or anecdote 
 
 TASK EXTRACTION:
-Extract tasks with who/what/when/where but respond minimally unless disambiguation is necessary, then ask for confirmation of most logical interpretation.
+Extract tasks with who/what/when/where but respond minimally. Note: 'when' and 'where' might be in the title itself.
+- Task 'title' is the 'what'.
+- 'when_text' is the time/day.
+- 'where_text' is the location.
 
 OPERATIONS:
 - "done"/"bought"/"finished" → mark complete
 - "list"/"what's on" → show list
-- "delete all"/"clear everything" → remove ALL active tasks but reconfirm intention
-- "remove X" → remove specific task and communicate this
+- "delete all"/"clear everything" → remove ALL active tasks
+- "remove X" → remove specific task
 
-Respond as JSON:
+Respond as JSON only:
 {
   "message": "Your ULTRA brief response",
-  "tasks": [...],
-  "operations": [...]
+  "tasks": [{"title": "...", "who": "...", "when_text": "...", "where_text": "...", "importance": "...", "category": "..."}],
+  "operations": [{"type": "...", "target": "...", "details": {...}}]
 }
 `;
 
   try {
     const completion = await openai.chat.completions.create({
-      model: "gpt-4.1", // Best model as requested
+      model: "gpt-4o",
       messages: [
-        { 
-          role: "system", 
-          content: "You are a terse but wholesome grandma. If new tasks are submitted, just confirm tasks briefly."
-        },
+        { role: "system", content: "You are a terse grandma. Maximum 10 words per response. You only output valid JSON." },
         { role: "user", content: prompt }
       ],
-      temperature: 0.3, // Less creative, more consistent
-      max_tokens: 300,
+      response_format: { type: "json_object" }, // Use JSON mode for reliability
+      temperature: 0.3,
+      max_tokens: 400,
     });
     
     const response = completion.choices[0].message.content;
-    console.log('Grandma says:', response);
-    
-    try {
-      return JSON.parse(response);
-    } catch (e) {
-      // Extract JSON if wrapped
-      const jsonMatch = response.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]);
-      }
-      
-      // Fallback
-      return {
-        message: `Got it, ${person}.`,
-        tasks: [],
-        operations: []
-      };
-    }
+    console.log('Grandma says (JSON):', response);
+    return JSON.parse(response);
     
   } catch (error) {
     console.error('AI Error:', error);
-    
-    // Grandma's backup wisdom
+    // Fallback logic remains the same
     const lowerText = text.toLowerCase();
-    
-    // Check for delete all
-    if (lowerText.includes('delete all') || lowerText.includes('clear everything') || 
-        lowerText.includes('alles löschen') || lowerText.includes('clear all')) {
-      return {
-        message: `All cleared.`,
-        tasks: [],
-        operations: [{ type: 'clear_all', target: 'all', details: {} }]
-      };
+    if (lowerText.includes('delete all') || lowerText.includes('clear everything')) {
+      return { message: `All cleared.`, tasks: [], operations: [{ type: 'clear_all' }] };
     }
-    
-    if (lowerText.includes('done') || lowerText.includes('bought') || lowerText.includes('erledigt')) {
-      return {
-        message: `Noted.`,
-        tasks: [],
-        operations: [{ type: 'complete', target: text, details: {} }]
-      };
+    if (lowerText.includes('done') || lowerText.includes('bought')) {
+      return { message: `Noted.`, tasks: [], operations: [{ type: 'complete', target: text }] };
     }
-    
-    if (lowerText.includes('list') || lowerText.includes('what') || lowerText.includes('was')) {
-      return {
-        message: `Here:`,
-        tasks: [],
-        operations: [{ type: 'list', target: 'all', details: {} }]
-      };
+    if (lowerText.includes('list') || lowerText.includes('what')) {
+      return { message: `Here:`, tasks: [], operations: [{ type: 'list' }] };
     }
-    
-    return {
-      message: `Again?`,
-      tasks: [],
-      operations: []
-    };
+    return { message: `Again?`, tasks: [], operations: [] };
   }
 }
 
-// Process new tasks
-async function processTasks(newTasks, person) {
-  const data = await loadJSON(TASKS_FILE);
-  
-  for (const task of newTasks) {
-    const taskRecord = {
-      id: data.taskIdCounter++,
-      title: task.title,
-      who: task.who || person,
-      when: task.when || null,
-      where: task.where || null,
-      importance: task.importance || 'normal',
-      category: task.category || 'general',
-      createdBy: person,
-      createdAt: new Date().toISOString(),
-      completed: false
-    };
-    
-    data.tasks.push(taskRecord);
+// Process new tasks using a transaction
+function processTasks(newTasks, person) {
+  const insert = db.prepare(`
+    INSERT INTO tasks (title, who, when_text, where_text, importance, category, createdBy, createdAt)
+    VALUES (@title, @who, @when, @where, @importance, @category, @createdBy, @createdAt)
+  `);
+
+  const insertMany = db.transaction((tasks) => {
+    for (const task of tasks) {
+        const taskRecord = {
+            title: task.title,
+            who: task.who || person,
+            when: task.when_text || null,
+            where: task.where_text || null,
+            importance: task.importance || 'normal',
+            category: task.category || 'general',
+            createdBy: person,
+            createdAt: new Date().toISOString()
+        };
+        insert.run(taskRecord);
+    }
+  });
+
+  try {
+    insertMany(newTasks);
+    console.log(`Added ${newTasks.length} new tasks to the database.`);
+  } catch (err) {
+    console.error('Failed to add tasks in transaction:', err);
   }
-  
-  await saveJSON(TASKS_FILE, data);
 }
 
 // Process operations (complete, remove, list, etc)
-async function processOperations(operations, person, chatId) {
-  const data = await loadJSON(TASKS_FILE);
-  
+function processOperations(operations, person, chatId) {
   for (const op of operations) {
     switch (op.type) {
-      case 'complete':
-        await handleComplete(data, op.target, person, chatId);
-        break;
-        
-      case 'remove':
-        await handleRemove(data, op.target, person, chatId);
-        break;
-        
-      case 'list':
-        await handleList(data, op.target, person, chatId);
-        break;
-        
-      case 'assign':
-        await handleAssign(data, op.target, op.details, person, chatId);
-        break;
-        
-      case 'clear_all':
-        await handleClearAll(data, person, chatId);
-        break;
+      case 'complete': handleComplete(op.target, person, chatId); break;
+      case 'remove': handleRemove(op.target, person, chatId); break;
+      case 'list': handleList(chatId); break;
+      case 'assign': handleAssign(person, chatId); break;
+      case 'clear_all': handleClearAll(person, chatId); break;
     }
   }
 }
 
-// Handle clearing all tasks
-async function handleClearAll(data, person, chatId) {
-  const activeCount = data.tasks.filter(t => !t.completed).length;
+// --- Operation Handlers (using DB queries) ---
+
+function handleClearAll(person, chatId) {
+  const result = db.prepare(`
+    UPDATE tasks 
+    SET completed = 1, completedAt = ?, completedBy = ? 
+    WHERE completed = 0
+  `).run(new Date().toISOString(), person);
   
-  // Mark all as completed (soft delete)
-  data.tasks.forEach(task => {
-    if (!task.completed) {
-      task.completed = true;
-      task.completedAt = new Date().toISOString();
-      task.completedBy = person;
-    }
-  });
-  
-  await saveJSON(TASKS_FILE, data);
-  bot.sendMessage(chatId, `Cleared ${activeCount} tasks.`);
+  bot.sendMessage(chatId, `Cleared ${result.changes} tasks.`);
 }
 
-// Handle task completion
-async function handleComplete(data, target, person, chatId) {
-  const activeTasks = data.tasks.filter(t => !t.completed);
+function handleComplete(target, person, chatId) {
   const targetLower = target.toLowerCase();
-  
-  // Find matching task
-  let task = activeTasks.find(t => 
-    t.title.toLowerCase().includes(targetLower) ||
-    targetLower.includes(t.title.toLowerCase())
-  );
-  
-  if (!task && activeTasks.length > 0) {
-    // Try to match by who did it
-    task = activeTasks.filter(t => t.who === person).pop();
-  }
+  // Attempt a fuzzy match on the title
+  const task = db.prepare(`
+    SELECT id, title FROM tasks 
+    WHERE completed = 0 AND lower(title) LIKE ? 
+    ORDER BY length(title) ASC LIMIT 1
+  `).get(`%${targetLower.replace('done', '').replace('bought', '').trim()}%`);
   
   if (task) {
-    task.completed = true;
-    task.completedAt = new Date().toISOString();
-    task.completedBy = person;
-    await saveJSON(TASKS_FILE, data);
+    db.prepare(`
+      UPDATE tasks 
+      SET completed = 1, completedAt = ?, completedBy = ? 
+      WHERE id = ?
+    `).run(new Date().toISOString(), person, task.id);
     
-    const responses = [
-      `Done.`,
-      `Good.`,
-      `Next.`,
-      `Noted.`,
-      `Check.`
-    ];
-    
+    const responses = [`Done.`, `Good.`, `Next.`, `Noted.`, `Check.`];
     bot.sendMessage(chatId, responses[Math.floor(Math.random() * responses.length)]);
   } else {
     bot.sendMessage(chatId, `What exactly?`);
   }
 }
 
-// Handle listing tasks - IMPROVED FORMATTING
-async function handleList(data, target, person, chatId) {
-  const activeTasks = data.tasks.filter(t => !t.completed);
+function handleList(chatId) {
+  const urgent = db.prepare("SELECT * FROM tasks WHERE completed = 0 AND importance = 'urgent'").all();
+  const shopping = db.prepare("SELECT * FROM tasks WHERE completed = 0 AND category = 'shopping'").all();
+  const regular = db.prepare("SELECT * FROM tasks WHERE completed = 0 AND importance != 'urgent' AND category != 'shopping'").all();
   
-  if (activeTasks.length === 0) {
+  if (urgent.length === 0 && shopping.length === 0 && regular.length === 0) {
     bot.sendMessage(chatId, `Nothing to do.`);
     return;
   }
-  
-  // Group by location for shopping
-  const shopping = activeTasks.filter(t => t.category === 'shopping');
-  const urgent = activeTasks.filter(t => t.importance === 'urgent');
-  const regular = activeTasks.filter(t => t.importance !== 'urgent' && t.category !== 'shopping');
   
   let message = '';
   
   if (urgent.length > 0) {
     message += 'URGENT:\n';
-    urgent.forEach(t => {
-      message += `${t.title} | ${t.who}${t.when ? ' | ' + t.when : ''}\n`;
-    });
+    urgent.forEach(t => message += `${t.title} | ${t.who}${t.when_text ? ' | ' + t.when_text : ''}\n`);
     message += '\n';
   }
   
   if (shopping.length > 0) {
-    const byStore = {};
-    shopping.forEach(t => {
-      const store = t.where || 'wherever';
-      if (!byStore[store]) byStore[store] = [];
-      byStore[store].push(t);
-    });
+    const byStore = shopping.reduce((acc, t) => {
+        const store = t.where_text || 'General Shopping';
+        if (!acc[store]) acc[store] = [];
+        acc[store].push(t);
+        return acc;
+    }, {});
     
     message += 'SHOPPING:\n';
     for (const [store, items] of Object.entries(byStore)) {
       message += `${store}:\n`;
-      items.forEach(t => {
-        message += `  ${t.title} | ${t.who}\n`;
-      });
+      items.forEach(t => message += `  ${t.title} | ${t.who}\n`);
     }
     message += '\n';
   }
   
   if (regular.length > 0) {
     message += 'TASKS:\n';
-    regular.forEach(t => {
-      message += `${t.title} | ${t.who}${t.when ? ' | ' + t.when : ''}\n`;
-    });
+    regular.forEach(t => message += `${t.title} | ${t.who}${t.when_text ? ' | ' + t.when_text : ''}\n`);
   }
   
   bot.sendMessage(chatId, message.trim());
 }
 
-// Handle task removal
-async function handleRemove(data, target, person, chatId) {
+function handleRemove(target, person, chatId) {
   const targetLower = target.toLowerCase();
-  const taskIndex = data.tasks.findIndex(t => 
-    !t.completed && t.title.toLowerCase().includes(targetLower)
-  );
-  
-  if (taskIndex !== -1) {
-    const removed = data.tasks.splice(taskIndex, 1)[0];
-    await saveJSON(TASKS_FILE, data);
-    bot.sendMessage(chatId, `Fine, ${person}. Removed "${removed.title}".`);
+  const task = db.prepare(`
+    SELECT id, title FROM tasks 
+    WHERE completed = 0 AND lower(title) LIKE ? 
+    LIMIT 1
+  `).get(`%${targetLower}%`);
+
+  if (task) {
+    db.prepare('DELETE FROM tasks WHERE id = ?').run(task.id);
+    bot.sendMessage(chatId, `Fine, ${person}. Removed "${task.title}".`);
   } else {
     bot.sendMessage(chatId, `Can't find that one, ${person}.`);
   }
 }
 
-// Handle task assignment
-async function handleAssign(data, target, details, person, chatId) {
-  // Implementation for reassigning tasks
+function handleAssign(person, chatId) {
   bot.sendMessage(chatId, `${person}, tell them yourself. I'm not your messenger.`);
 }
 
-// Monthly cleanup (run daily, only acts monthly)
+// --- Maintenance ---
+
 async function monthlyCleanup() {
-  const data = await loadJSON(TASKS_FILE);
-  const knowledge = await loadJSON(KNOWLEDGE_FILE);
-  
-  const lastCleanup = new Date(knowledge.lastCleanup || 0);
+  const knowledge = db.prepare("SELECT value FROM knowledge WHERE key = 'lastCleanup'").get();
+  const lastCleanup = new Date(knowledge.value);
   const now = new Date();
   
-  // Check if a month has passed
   if (now - lastCleanup < 30 * 24 * 60 * 60 * 1000) return;
-  
-  // Archive old completed tasks
+
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - 30);
   
-  const archive = data.tasks.filter(t => 
-    t.completed && new Date(t.completedAt) < cutoff
-  );
+  const oldTasks = db.prepare('SELECT * FROM tasks WHERE completed = 1 AND completedAt < ?').all(cutoff.toISOString());
   
-  if (archive.length > 0) {
-    // Save archive
+  if (oldTasks.length > 0) {
     const archiveFile = `archive_${now.toISOString().split('T')[0]}.json`;
-    await saveJSON(archiveFile, { archived: archive });
+    await fs.writeFile(archiveFile, JSON.stringify({ archived: oldTasks }, null, 2));
     
-    // Remove from main file
-    data.tasks = data.tasks.filter(t => 
-      !t.completed || new Date(t.completedAt) >= cutoff
-    );
-    
-    await saveJSON(TASKS_FILE, data);
-    console.log(`Archived ${archive.length} old tasks to ${archiveFile}`);
+    db.prepare('DELETE FROM tasks WHERE completed = 1 AND completedAt < ?').run(cutoff.toISOString());
+    console.log(`Archived ${oldTasks.length} old tasks to ${archiveFile}`);
   }
   
-  knowledge.lastCleanup = now.toISOString();
-  await saveJSON(KNOWLEDGE_FILE, knowledge);
+  db.prepare("UPDATE knowledge SET value = ? WHERE key = 'lastCleanup'").run(now.toISOString());
 }
 
 // Voice message handler
 bot.on('voice', async (msg) => {
   const chatId = msg.chat.id;
   const person = msg.from.first_name || msg.from.username;
-  
   bot.sendMessage(chatId, `${person}, I'm too old for voice messages. Type it out.`);
 });
 
-// Start everything
-initStorage().then(async () => {
-  console.log('Grandma Bot is ready to keep house!');
-  
-  // Load previous context
-  const context = await loadJSON(CONTEXT_FILE);
-  grandma.shortTermMemory = context.messages || [];
+// --- Startup Sequence ---
+try {
+  initStorage();
+  grandma.hydrate();
   
   // Set up daily cleanup check
-  setInterval(monthlyCleanup, 24 * 60 * 60 * 1000); // Daily
+  setInterval(monthlyCleanup, 24 * 60 * 60 * 1000); // Check daily
   monthlyCleanup(); // Run once on start
   
-}).catch(error => {
+  console.log('Grandma Bot is ready to keep house!');
+} catch(error) {
   console.error('Failed to start:', error);
   process.exit(1);
-});
+}
 
 // Error handling
-bot.on('polling_error', (error) => {
-  console.error('Telegram error:', error);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection:', reason);
-});
+bot.on('polling_error', (error) => console.error('Telegram error:', error.code));
+process.on('unhandledRejection', (reason, promise) => console.error('Unhandled Rejection:', reason));
