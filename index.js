@@ -4,423 +4,520 @@ const OpenAI = require('openai');
 const fs = require('fs').promises;
 const path = require('path');
 
-// Initialize
-const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+// Kill any existing bot instances first
+process.on('SIGINT', () => {
+  console.log('Shutting down gracefully...');
+  process.exit(0);
+});
+
+// Initialize - IMPORTANT: Set polling to false first, then start
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { 
+  polling: false,
+  filepath: false 
+});
+
+// Clear any webhooks and start polling
+bot.deleteWebHook().then(() => {
+  bot.startPolling();
+  console.log('Bot polling started successfully');
+}).catch(err => {
+  console.error('Failed to start polling:', err);
+  process.exit(1);
+});
+
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // Storage
 const TASKS_FILE = 'tasks.json';
-const CHAT_CONTEXT_FILE = 'context.json';
+const CONTEXT_FILE = 'context.json';
+const KNOWLEDGE_FILE = 'knowledge.json';
 
-// Initialize storage files with error handling
+// Initialize storage
 async function initStorage() {
-  // Initialize tasks file
+  const files = [
+    { path: TASKS_FILE, default: { tasks: [], taskIdCounter: 1 } },
+    { path: CONTEXT_FILE, default: { messages: [] } },
+    { path: KNOWLEDGE_FILE, default: { 
+      people: {}, 
+      preferences: {},
+      patterns: {},
+      lastCleanup: new Date().toISOString()
+    }}
+  ];
+  
+  for (const file of files) {
+    try {
+      await fs.access(file.path);
+      const data = await fs.readFile(file.path, 'utf8');
+      JSON.parse(data); // Validate
+    } catch {
+      console.log(`Creating ${file.path}...`);
+      await fs.writeFile(file.path, JSON.stringify(file.default, null, 2));
+    }
+  }
+}
+
+// Load/Save helpers
+async function loadJSON(filename, fallback = {}) {
   try {
-    await fs.access(TASKS_FILE);
-    // Try to read and validate
-    const data = await fs.readFile(TASKS_FILE, 'utf8');
-    JSON.parse(data); // Test if valid JSON
+    const data = await fs.readFile(filename, 'utf8');
+    return JSON.parse(data);
   } catch {
-    console.log('Creating new tasks.json file...');
-    await fs.writeFile(TASKS_FILE, JSON.stringify({ tasks: [] }, null, 2));
+    return fallback;
+  }
+}
+
+async function saveJSON(filename, data) {
+  await fs.writeFile(filename, JSON.stringify(data, null, 2));
+}
+
+// Grandma's memory system
+class GrandmaMemory {
+  constructor() {
+    this.shortTermMemory = []; // Recent conversation
+    this.workingMemory = {};   // Current conversation state
   }
   
-  // Initialize context file
-  try {
-    await fs.access(CHAT_CONTEXT_FILE);
-    // Try to read and validate
-    const data = await fs.readFile(CHAT_CONTEXT_FILE, 'utf8');
-    JSON.parse(data); // Test if valid JSON
-  } catch {
-    console.log('Creating new context.json file...');
-    await fs.writeFile(CHAT_CONTEXT_FILE, JSON.stringify({ messages: [] }, null, 2));
+  async remember(msg) {
+    const memory = {
+      time: new Date().toISOString(),
+      person: msg.from.first_name || msg.from.username,
+      personId: msg.from.id,
+      said: msg.text,
+      chatId: msg.chat.id
+    };
+    
+    this.shortTermMemory.push(memory);
+    if (this.shortTermMemory.length > 20) {
+      this.shortTermMemory.shift();
+    }
+    
+    // Update context file (for restart persistence)
+    const context = await loadJSON(CONTEXT_FILE);
+    context.messages = this.shortTermMemory;
+    await saveJSON(CONTEXT_FILE, context);
+    
+    return memory;
+  }
+  
+  getConversationContext() {
+    return this.shortTermMemory.slice(-10).map(m => 
+      `${m.person}: ${m.said}`
+    ).join('\n');
+  }
+  
+  async updateKnowledge(person, info) {
+    const knowledge = await loadJSON(KNOWLEDGE_FILE);
+    if (!knowledge.people[person]) {
+      knowledge.people[person] = {};
+    }
+    Object.assign(knowledge.people[person], info);
+    await saveJSON(KNOWLEDGE_FILE, knowledge);
   }
 }
 
-// Safe load/save functions with error handling
-async function loadTasks() {
-  try {
-    const data = await fs.readFile(TASKS_FILE, 'utf8');
-    return JSON.parse(data);
-  } catch (error) {
-    console.error('Error loading tasks, creating new file:', error);
-    const emptyTasks = { tasks: [] };
-    await fs.writeFile(TASKS_FILE, JSON.stringify(emptyTasks, null, 2));
-    return emptyTasks;
-  }
-}
+const grandma = new GrandmaMemory();
 
-async function saveTasks(tasks) {
-  await fs.writeFile(TASKS_FILE, JSON.stringify(tasks, null, 2));
-}
-
-async function loadContext() {
-  try {
-    const data = await fs.readFile(CHAT_CONTEXT_FILE, 'utf8');
-    return JSON.parse(data);
-  } catch (error) {
-    console.error('Error loading context, creating new file:', error);
-    const emptyContext = { messages: [] };
-    await fs.writeFile(CHAT_CONTEXT_FILE, JSON.stringify(emptyContext, null, 2));
-    return emptyContext;
-  }
-}
-
-async function saveContext(context) {
-  await fs.writeFile(CHAT_CONTEXT_FILE, JSON.stringify(context, null, 2));
-}
-
-// Main message handler
+// Main message handler - Grandma always responds!
 bot.on('message', async (msg) => {
-  // Ignore bot's own messages
   if (msg.from.is_bot) return;
+  if (!msg.text) return;
   
   const chatId = msg.chat.id;
-  const userName = msg.from.first_name || msg.from.username || 'Unbekannt';
-  const text = msg.text || '';
+  const person = msg.from.first_name || msg.from.username || 'child';
   
-  // Skip if no text
-  if (!text) return;
-  
-  console.log(`[${new Date().toISOString()}] ${userName}: ${text}`);
+  // Remember everything
+  await grandma.remember(msg);
   
   try {
-    // Save to context
-    const context = await loadContext();
-    context.messages.push({
-      timestamp: new Date().toISOString(),
-      user: userName,
-      userId: msg.from.id,
-      text: text,
-      chatId: chatId
-    });
+    // Let Grandma think
+    bot.sendChatAction(chatId, 'typing');
+    const response = await processWithGrandmaWisdom(msg.text, person, grandma.getConversationContext());
     
-    // Keep only last 50 messages for context
-    if (context.messages.length > 50) {
-      context.messages = context.messages.slice(-50);
-    }
-    await saveContext(context);
-    
-    // Check if it's asking about tasks
-    const isAskingAboutTasks = checkIfAskingAboutTasks(text);
-    
-    if (isAskingAboutTasks) {
-      await handleTaskQuery(chatId);
-      return;
+    // Always respond
+    if (response.message) {
+      await bot.sendMessage(chatId, response.message);
     }
     
-    // Check if marking task as done
-    const isDoneMessage = checkIfDoneMessage(text);
-    
-    if (isDoneMessage) {
-      await handleDoneMessage(chatId, text, userName);
-      return;
+    // Handle tasks
+    if (response.tasks.length > 0) {
+      await processTasks(response.tasks, person);
     }
     
-    // Process with AI for task extraction
-    const result = await processMessage(text, userName, context.messages);
-    
-    if (result.tasksFound.length > 0) {
-      // Save new tasks
-      const savedTasks = await loadTasks();
-      savedTasks.tasks.push(...result.tasksFound);
-      await saveTasks(savedTasks);
-      
-      // Send confirmation
-      bot.sendMessage(chatId, result.response);
-    } else if (result.shouldRespond) {
-      // Bot was mentioned or asked something
-      bot.sendMessage(chatId, result.response);
+    // Handle task operations
+    if (response.operations.length > 0) {
+      await processOperations(response.operations, person, chatId);
     }
-    // Otherwise stay silent
     
   } catch (error) {
-    console.error('Error processing message:', error);
-    // Stay silent on errors
+    console.error('Grandma error:', error);
+    bot.sendMessage(chatId, `Try again.`);
   }
 });
 
-// Check if asking about tasks
-function checkIfAskingAboutTasks(text) {
-  const lowerText = text.toLowerCase();
-  const taskQuestions = [
-    'was müssen wir',
-    'was brauchen wir', 
-    'was war nochmal',
-    'was sollten wir',
-    'einkaufsliste',
-    'was kaufen',
-    'was besorgen',
-    'was ist zu tun',
-    'offene aufgaben',
-    'todo',
-    'was steht an',
-    'liste'
-  ];
-  
-  return taskQuestions.some(q => lowerText.includes(q));
-}
-
-// Check if marking as done
-function checkIfDoneMessage(text) {
-  const donePatterns = [
-    /^(done|erledigt|fertig|gemacht|gekauft|geholt|✓|✔|☑)/i,
-    /^(hab|habe|haben) .* (gekauft|geholt|gemacht|erledigt)/i,
-    /^(ist|sind|war|waren) (erledigt|fertig|gemacht)/i
-  ];
-  
-  return donePatterns.some(pattern => pattern.test(text));
-}
-
-// Handle task queries
-async function handleTaskQuery(chatId) {
-  try {
-    const tasks = await loadTasks();
-    const activeTasks = tasks.tasks.filter(t => !t.completed);
-    
-    if (activeTasks.length === 0) {
-      bot.sendMessage(chatId, "Alles erledigt! 🎉");
-      return;
-    }
-    
-    // Group by category/location
-    const shopping = activeTasks.filter(t => t.category === 'shopping');
-    const other = activeTasks.filter(t => t.category !== 'shopping');
-    
-    let response = "";
-    
-    if (shopping.length > 0) {
-      // Group shopping by location
-      const byLocation = {};
-      shopping.forEach(task => {
-        const loc = task.location || 'Sonstiges';
-        if (!byLocation[loc]) byLocation[loc] = [];
-        byLocation[loc].push(task);
-      });
-      
-      response += "**Einkaufen:**\n";
-      for (const [location, tasks] of Object.entries(byLocation)) {
-        response += `\n📍 ${location}:\n`;
-        tasks.forEach(task => {
-          response += `• ${task.title} (von ${task.createdBy})\n`;
-        });
-      }
-    }
-    
-    if (other.length > 0) {
-      response += "\n**Sonstiges:**\n";
-      other.forEach(task => {
-        response += `• ${task.title} (von ${task.createdBy})\n`;
-      });
-    }
-    
-    bot.sendMessage(chatId, response || "Nichts zu tun! 🎉", { parse_mode: 'Markdown' });
-    
-  } catch (error) {
-    console.error('Error handling task query:', error);
-    bot.sendMessage(chatId, "Ups, da ist was schiefgelaufen beim Laden der Tasks 😅");
-  }
-}
-
-// Handle done messages
-async function handleDoneMessage(chatId, text, userName) {
-  try {
-    const tasks = await loadTasks();
-    const activeTasks = tasks.tasks.filter(t => !t.completed);
-    
-    if (activeTasks.length === 0) {
-      bot.sendMessage(chatId, "Es gibt nichts zu erledigen! 🤷");
-      return;
-    }
-    
-    // Try to find what was completed
-    const words = text.split(' ').slice(1);
-    const searchText = words.join(' ').toLowerCase();
-    
-    let completedTask = null;
-    
-    if (searchText) {
-      // Search for specific task
-      completedTask = activeTasks.find(task => 
-        task.title.toLowerCase().includes(searchText) ||
-        searchText.includes(task.title.toLowerCase())
-      );
-    } else {
-      // If just "done", complete last task by this user
-      completedTask = activeTasks
-        .filter(t => t.createdBy === userName)
-        .pop();
-    }
-    
-    if (completedTask) {
-      completedTask.completed = true;
-      completedTask.completedAt = new Date().toISOString();
-      completedTask.completedBy = userName;
-      
-      await saveTasks(tasks);
-      
-      const responses = [
-        `✅ Super, ${completedTask.title} kann abgehakt werden!`,
-        `👍 ${completedTask.title} erledigt!`,
-        `🎯 Check! ${completedTask.title} ✓`,
-        `💪 Nice! ${completedTask.title} ist done!`
-      ];
-      
-      const randomResponse = responses[Math.floor(Math.random() * responses.length)];
-      bot.sendMessage(chatId, randomResponse);
-    } else {
-      bot.sendMessage(chatId, "Hmm, ich bin nicht sicher was du erledigt hast. Kannst du es genauer sagen? 🤔");
-    }
-    
-  } catch (error) {
-    console.error('Error handling done message:', error);
-  }
-}
-
-// AI Processing
-async function processMessage(text, userName, recentMessages) {
-  // Build context from recent messages
-  const contextString = recentMessages.slice(-10).map(m => 
-    `${m.user}: ${m.text}`
-  ).join('\n');
+// Grandma's wisdom processor
+async function processWithGrandmaWisdom(text, person, context) {
+  const tasks = await loadJSON(TASKS_FILE);
+  const activeTasks = tasks.tasks.filter(t => !t.completed);
   
   const prompt = `
-Du bist ein hilfsbereiter Assistent in einem Telegram-Gruppenchat. Du liest mit und merkst dir Aufgaben.
+You are a wise, street-smart grandma who keeps an impeccable household. You're extremely brief and direct.
 
-KONTEXT der letzten Nachrichten:
-${contextString}
+RECENT CONVERSATION:
+${context}
 
-AKTUELLE NACHRICHT von ${userName}: "${text}"
+CURRENT MESSAGE from ${person}: "${text}"
 
-DEINE AUFGABEN:
-1. Erkenne ob Tasks/Aufgaben erwähnt werden
-2. Verstehe deutschen Kontext (DM = Drogeriemarkt, etc.)
-3. Antworte NUR wenn neue Tasks erkannt wurden
+ACTIVE TASKS (${activeTasks.length} total):
+${activeTasks.slice(0, 10).map(t => 
+  `- ${t.title} (${t.who || 'someone'} needs to do this${t.when ? ' ' + t.when : ''}${t.where ? ' at ' + t.where : ''})`
+).join('\n')}
 
-TASK-ERKENNUNG:
-- "Wir brauchen..." → Task
-- "Nicht vergessen..." → Task  
-- "DM: Zahnbürste" → Task: Zahnbürste bei DM kaufen
-- "Zahnbürste" allein → Task: Zahnbürste kaufen
-- Einkaufslisten
-- Termine/Verabredungen
-- Alles was erledigt werden muss
+YOUR RULES:
+1. ULTRA BRIEF responses (5-10 words max)
+2. When adding tasks, just confirm briefly: "Got it." or "Noted."
+3. NO explanations, NO emojis, NO elaboration
+4. If "delete all" or "clear everything" → remove ALL tasks
+5. List formatting: use "|" between items
 
-ANTWORT-STIL:
-- Kurz und natürlich
-- Wie ein Freund, nicht wie ein Roboter
-- Bestätige Tasks freundlich
-- KEINE Antwort wenn keine Tasks erkannt wurden
+TASK EXTRACTION:
+Extract tasks with who/what/when/where but respond minimally.
 
-Antworte als JSON:
+OPERATIONS:
+- "done"/"bought"/"finished" → mark complete
+- "list"/"what's on" → show list
+- "delete all"/"clear everything" → remove ALL active tasks
+- "remove X" → remove specific task
+
+Respond as JSON:
 {
-  "shouldRespond": true/false,
-  "response": "Deine natürliche Antwort oder null",
-  "tasksFound": [
-    {
-      "title": "Was zu tun ist",
-      "assignedTo": "Person",
-      "location": "Ort oder null",
-      "dueDate": "YYYY-MM-DD oder null",
-      "category": "shopping/household/work/personal",
-      "createdBy": "${userName}",
-      "createdAt": "${new Date().toISOString()}"
-    }
-  ]
+  "message": "Your ULTRA brief response",
+  "tasks": [...],
+  "operations": [...]
 }
-
-WICHTIG: Antworte NUR mit JSON, nichts anderes!
 `;
 
   try {
     const completion = await openai.chat.completions.create({
-      model: "gpt-4.1", // oder gpt-4o-mini wenn du es hast
+      model: "gpt-4o", // Best model as requested
       messages: [
         { 
           role: "system", 
-          content: "Du bist ein Task-Management-Assistent. Antworte NUR mit validem JSON, nichts anderes!"
+          content: "You are a terse grandma. Maximum 10 words per response. Just confirm tasks briefly."
         },
         { role: "user", content: prompt }
       ],
-      temperature: 0.3,
-      max_tokens: 500,
+      temperature: 0.3, // Less creative, more consistent
+      max_tokens: 300,
     });
     
     const response = completion.choices[0].message.content;
-    console.log('AI Response:', response);
+    console.log('Grandma says:', response);
     
     try {
-      const parsed = JSON.parse(response);
-      return parsed;
+      return JSON.parse(response);
     } catch (e) {
-      console.error('JSON Parse error:', e);
-      console.error('Response was:', response);
-      
-      // Try to extract JSON if it's wrapped in something
+      // Extract JSON if wrapped
       const jsonMatch = response.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        try {
-          return JSON.parse(jsonMatch[0]);
-        } catch (e2) {
-          console.error('Second parse attempt failed:', e2);
-        }
+        return JSON.parse(jsonMatch[0]);
       }
       
       // Fallback
       return {
-        shouldRespond: false,
-        response: null,
-        tasksFound: []
+        message: `Got it, ${person}.`,
+        tasks: [],
+        operations: []
       };
     }
     
   } catch (error) {
-    console.error('OpenAI Error:', error);
+    console.error('AI Error:', error);
     
-    // Simple fallback detection without AI
-    const taskKeywords = ['kaufen', 'brauchen', 'holen', 'müssen', 'vergessen', 'dm', 'rewe', 'aldi'];
-    const hasTaskKeyword = taskKeywords.some(keyword => text.toLowerCase().includes(keyword));
+    // Grandma's backup wisdom
+    const lowerText = text.toLowerCase();
     
-    if (hasTaskKeyword) {
+    // Check for delete all
+    if (lowerText.includes('delete all') || lowerText.includes('clear everything') || 
+        lowerText.includes('alles löschen') || lowerText.includes('clear all')) {
       return {
-        shouldRespond: true,
-        response: "Alles klar, hab's notiert! 📝",
-        tasksFound: [{
-          title: text,
-          assignedTo: userName,
-          location: null,
-          dueDate: null,
-          category: 'general',
-          createdBy: userName,
-          createdAt: new Date().toISOString()
-        }]
+        message: `All cleared.`,
+        tasks: [],
+        operations: [{ type: 'clear_all', target: 'all', details: {} }]
+      };
+    }
+    
+    if (lowerText.includes('done') || lowerText.includes('bought') || lowerText.includes('erledigt')) {
+      return {
+        message: `Noted.`,
+        tasks: [],
+        operations: [{ type: 'complete', target: text, details: {} }]
+      };
+    }
+    
+    if (lowerText.includes('list') || lowerText.includes('what') || lowerText.includes('was')) {
+      return {
+        message: `Here:`,
+        tasks: [],
+        operations: [{ type: 'list', target: 'all', details: {} }]
       };
     }
     
     return {
-      shouldRespond: false,
-      response: null,
-      tasksFound: []
+      message: `Again?`,
+      tasks: [],
+      operations: []
     };
   }
 }
 
-// Start the bot
-initStorage().then(() => {
-  console.log('✅ Natürlicher Task-Bot gestartet!');
-  console.log('📱 Füge den Bot zu einer Gruppe hinzu und chatte normal!');
-  console.log('🤖 Der Bot merkt sich automatisch alle Aufgaben.');
+// Process new tasks
+async function processTasks(newTasks, person) {
+  const data = await loadJSON(TASKS_FILE);
+  
+  for (const task of newTasks) {
+    const taskRecord = {
+      id: data.taskIdCounter++,
+      title: task.title,
+      who: task.who || person,
+      when: task.when || null,
+      where: task.where || null,
+      importance: task.importance || 'normal',
+      category: task.category || 'general',
+      createdBy: person,
+      createdAt: new Date().toISOString(),
+      completed: false
+    };
+    
+    data.tasks.push(taskRecord);
+  }
+  
+  await saveJSON(TASKS_FILE, data);
+}
+
+// Process operations (complete, remove, list, etc)
+async function processOperations(operations, person, chatId) {
+  const data = await loadJSON(TASKS_FILE);
+  
+  for (const op of operations) {
+    switch (op.type) {
+      case 'complete':
+        await handleComplete(data, op.target, person, chatId);
+        break;
+        
+      case 'remove':
+        await handleRemove(data, op.target, person, chatId);
+        break;
+        
+      case 'list':
+        await handleList(data, op.target, person, chatId);
+        break;
+        
+      case 'assign':
+        await handleAssign(data, op.target, op.details, person, chatId);
+        break;
+        
+      case 'clear_all':
+        await handleClearAll(data, person, chatId);
+        break;
+    }
+  }
+}
+
+// Handle clearing all tasks
+async function handleClearAll(data, person, chatId) {
+  const activeCount = data.tasks.filter(t => !t.completed).length;
+  
+  // Mark all as completed (soft delete)
+  data.tasks.forEach(task => {
+    if (!task.completed) {
+      task.completed = true;
+      task.completedAt = new Date().toISOString();
+      task.completedBy = person;
+    }
+  });
+  
+  await saveJSON(TASKS_FILE, data);
+  bot.sendMessage(chatId, `Cleared ${activeCount} tasks.`);
+}
+
+// Handle task completion
+async function handleComplete(data, target, person, chatId) {
+  const activeTasks = data.tasks.filter(t => !t.completed);
+  const targetLower = target.toLowerCase();
+  
+  // Find matching task
+  let task = activeTasks.find(t => 
+    t.title.toLowerCase().includes(targetLower) ||
+    targetLower.includes(t.title.toLowerCase())
+  );
+  
+  if (!task && activeTasks.length > 0) {
+    // Try to match by who did it
+    task = activeTasks.filter(t => t.who === person).pop();
+  }
+  
+  if (task) {
+    task.completed = true;
+    task.completedAt = new Date().toISOString();
+    task.completedBy = person;
+    await saveJSON(TASKS_FILE, data);
+    
+    const responses = [
+      `Done.`,
+      `Good.`,
+      `Next.`,
+      `Noted.`,
+      `Check.`
+    ];
+    
+    bot.sendMessage(chatId, responses[Math.floor(Math.random() * responses.length)]);
+  } else {
+    bot.sendMessage(chatId, `What exactly?`);
+  }
+}
+
+// Handle listing tasks - IMPROVED FORMATTING
+async function handleList(data, target, person, chatId) {
+  const activeTasks = data.tasks.filter(t => !t.completed);
+  
+  if (activeTasks.length === 0) {
+    bot.sendMessage(chatId, `Nothing to do.`);
+    return;
+  }
+  
+  // Group by location for shopping
+  const shopping = activeTasks.filter(t => t.category === 'shopping');
+  const urgent = activeTasks.filter(t => t.importance === 'urgent');
+  const regular = activeTasks.filter(t => t.importance !== 'urgent' && t.category !== 'shopping');
+  
+  let message = '';
+  
+  if (urgent.length > 0) {
+    message += 'URGENT:\n';
+    urgent.forEach(t => {
+      message += `${t.title} | ${t.who}${t.when ? ' | ' + t.when : ''}\n`;
+    });
+    message += '\n';
+  }
+  
+  if (shopping.length > 0) {
+    const byStore = {};
+    shopping.forEach(t => {
+      const store = t.where || 'wherever';
+      if (!byStore[store]) byStore[store] = [];
+      byStore[store].push(t);
+    });
+    
+    message += 'SHOPPING:\n';
+    for (const [store, items] of Object.entries(byStore)) {
+      message += `${store}:\n`;
+      items.forEach(t => {
+        message += `  ${t.title} | ${t.who}\n`;
+      });
+    }
+    message += '\n';
+  }
+  
+  if (regular.length > 0) {
+    message += 'TASKS:\n';
+    regular.forEach(t => {
+      message += `${t.title} | ${t.who}${t.when ? ' | ' + t.when : ''}\n`;
+    });
+  }
+  
+  bot.sendMessage(chatId, message.trim());
+}
+
+// Handle task removal
+async function handleRemove(data, target, person, chatId) {
+  const targetLower = target.toLowerCase();
+  const taskIndex = data.tasks.findIndex(t => 
+    !t.completed && t.title.toLowerCase().includes(targetLower)
+  );
+  
+  if (taskIndex !== -1) {
+    const removed = data.tasks.splice(taskIndex, 1)[0];
+    await saveJSON(TASKS_FILE, data);
+    bot.sendMessage(chatId, `Fine, ${person}. Removed "${removed.title}".`);
+  } else {
+    bot.sendMessage(chatId, `Can't find that one, ${person}.`);
+  }
+}
+
+// Handle task assignment
+async function handleAssign(data, target, details, person, chatId) {
+  // Implementation for reassigning tasks
+  bot.sendMessage(chatId, `${person}, tell them yourself. I'm not your messenger.`);
+}
+
+// Monthly cleanup (run daily, only acts monthly)
+async function monthlyCleanup() {
+  const data = await loadJSON(TASKS_FILE);
+  const knowledge = await loadJSON(KNOWLEDGE_FILE);
+  
+  const lastCleanup = new Date(knowledge.lastCleanup || 0);
+  const now = new Date();
+  
+  // Check if a month has passed
+  if (now - lastCleanup < 30 * 24 * 60 * 60 * 1000) return;
+  
+  // Archive old completed tasks
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - 30);
+  
+  const archive = data.tasks.filter(t => 
+    t.completed && new Date(t.completedAt) < cutoff
+  );
+  
+  if (archive.length > 0) {
+    // Save archive
+    const archiveFile = `archive_${now.toISOString().split('T')[0]}.json`;
+    await saveJSON(archiveFile, { archived: archive });
+    
+    // Remove from main file
+    data.tasks = data.tasks.filter(t => 
+      !t.completed || new Date(t.completedAt) >= cutoff
+    );
+    
+    await saveJSON(TASKS_FILE, data);
+    console.log(`Archived ${archive.length} old tasks to ${archiveFile}`);
+  }
+  
+  knowledge.lastCleanup = now.toISOString();
+  await saveJSON(KNOWLEDGE_FILE, knowledge);
+}
+
+// Voice message handler
+bot.on('voice', async (msg) => {
+  const chatId = msg.chat.id;
+  const person = msg.from.first_name || msg.from.username;
+  
+  bot.sendMessage(chatId, `${person}, I'm too old for voice messages. Type it out.`);
+});
+
+// Start everything
+initStorage().then(async () => {
+  console.log('Grandma Bot is ready to keep house!');
+  
+  // Load previous context
+  const context = await loadJSON(CONTEXT_FILE);
+  grandma.shortTermMemory = context.messages || [];
+  
+  // Set up daily cleanup check
+  setInterval(monthlyCleanup, 24 * 60 * 60 * 1000); // Daily
+  monthlyCleanup(); // Run once on start
+  
 }).catch(error => {
-  console.error('Failed to initialize storage:', error);
+  console.error('Failed to start:', error);
   process.exit(1);
 });
 
-// Error handlers
+// Error handling
 bot.on('polling_error', (error) => {
-  console.error('Telegram polling error:', error);
+  console.error('Telegram error:', error);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  console.error('Unhandled Rejection:', reason);
 });
-

@@ -1,125 +1,6 @@
 {
   "messages": [
     {
-      "timestamp": "2025-06-26T23:41:24.653Z",
-      "user": "Jeremy",
-      "userId": 7872887993,
-      "text": "Hi",
-      "chatId": 7872887993
-    },
-    {
-      "timestamp": "2025-06-26T23:41:25.409Z",
-      "user": "Jeremy",
-      "userId": 7872887993,
-      "text": "Hi",
-      "chatId": 7872887993
-    },
-    {
-      "timestamp": "2025-06-26T23:41:26.174Z",
-      "user": "Jeremy",
-      "userId": 7872887993,
-      "text": "Hi",
-      "chatId": 7872887993
-    },
-    {
-      "timestamp": "2025-06-26T23:41:26.989Z",
-      "user": "Jeremy",
-      "userId": 7872887993,
-      "text": "Hi",
-      "chatId": 7872887993
-    },
-    {
-      "timestamp": "2025-06-26T23:41:27.664Z",
-      "user": "Jeremy",
-      "userId": 7872887993,
-      "text": "Hi",
-      "chatId": 7872887993
-    },
-    {
-      "timestamp": "2025-06-26T23:41:28.452Z",
-      "user": "Jeremy",
-      "userId": 7872887993,
-      "text": "Hi",
-      "chatId": 7872887993
-    },
-    {
-      "timestamp": "2025-06-26T23:42:14.695Z",
-      "user": "Jeremy",
-      "userId": 7872887993,
-      "text": "Hi",
-      "chatId": 7872887993
-    },
-    {
-      "timestamp": "2025-06-26T23:42:32.000Z",
-      "user": "Jeremy",
-      "userId": 7872887993,
-      "text": "Was denn",
-      "chatId": 7872887993
-    },
-    {
-      "timestamp": "2025-06-26T23:42:40.370Z",
-      "user": "Jeremy",
-      "userId": 7872887993,
-      "text": "Dm Zahnbürste",
-      "chatId": 7872887993
-    },
-    {
-      "timestamp": "2025-06-26T23:42:48.461Z",
-      "user": "Jeremy",
-      "userId": 7872887993,
-      "text": "Ne Edeka",
-      "chatId": 7872887993
-    },
-    {
-      "timestamp": "2025-06-26T23:43:02.080Z",
-      "user": "Jeremy",
-      "userId": 7872887993,
-      "text": "Welche Aufgaben habe ich",
-      "chatId": 7872887993
-    },
-    {
-      "timestamp": "2025-06-26T23:43:15.899Z",
-      "user": "Jeremy",
-      "userId": 7872887993,
-      "text": "Geb ne Liste",
-      "chatId": 7872887993
-    },
-    {
-      "timestamp": "2025-06-26T23:43:27.135Z",
-      "user": "Jeremy",
-      "userId": 7872887993,
-      "text": "Alles löschen",
-      "chatId": 7872887993
-    },
-    {
-      "timestamp": "2025-06-26T23:43:36.133Z",
-      "user": "Jeremy",
-      "userId": 7872887993,
-      "text": "Was gibt es",
-      "chatId": 7872887993
-    },
-    {
-      "timestamp": "2025-06-26T23:43:46.230Z",
-      "user": "Jeremy",
-      "userId": 7872887993,
-      "text": "Geh ne Liste",
-      "chatId": 7872887993
-    },
-    {
-      "timestamp": "2025-06-26T23:44:07.234Z",
-      "user": "Jeremy",
-      "userId": 7872887993,
-      "text": "Welche Aufgaben habe ich?",
-      "chatId": 7872887993
-    },
-    {
-      "timestamp": "2025-06-26T23:44:16.556Z",
-      "user": "Jeremy",
-      "userId": 7872887993,
-      "text": "/tasks",
-      "chatId": 7872887993
-    },
-    {
       "timestamp": "2025-06-26T23:45:04.048Z",
       "user": "Jeremy",
       "userId": 7872887993,
@@ -229,6 +110,125 @@
       "user": "Jeremy",
       "userId": 7872887993,
       "text": "Sag mir eine Reihenfolge",
+      "chatId": 7872887993
+    },
+    {
+      "time": "2025-06-27T21:56:10.258Z",
+      "person": "Jeremy",
+      "personId": 7872887993,
+      "said": "Hi",
+      "chatId": 7872887993
+    },
+    {
+      "time": "2025-06-27T21:56:24.604Z",
+      "person": "Jeremy",
+      "personId": 7872887993,
+      "said": "What do I have to do",
+      "chatId": 7872887993
+    },
+    {
+      "time": "2025-06-27T21:56:36.573Z",
+      "person": "Jeremy",
+      "personId": 7872887993,
+      "said": "What’s better",
+      "chatId": 7872887993
+    },
+    {
+      "time": "2025-06-27T21:56:51.221Z",
+      "person": "Jeremy",
+      "personId": 7872887993,
+      "said": "What else",
+      "chatId": 7872887993
+    },
+    {
+      "time": "2025-06-27T21:57:35.494Z",
+      "person": "Jeremy",
+      "personId": 7872887993,
+      "said": "Also ich muss einige Sachen holen. Ich muss aufräumen im Schlafzimmer. Ich muss aufräumen im Wohnzimmer und dann den Flur aufräumen. Im Flur gibt’s relativ vieles rumliegt. Das muss weg dann muss ich die Küche sauber machen und davor noch Gassi gehen und um 3:00 Uhr kommt Moana heim also um 15:00 Uhr quasi",
+      "chatId": 7872887993
+    },
+    {
+      "time": "2025-06-27T21:58:00.249Z",
+      "person": "Jeremy",
+      "personId": 7872887993,
+      "said": "Summarize the tasks",
+      "chatId": 7872887993
+    },
+    {
+      "time": "2025-06-27T21:58:28.786Z",
+      "person": "Jeremy",
+      "personId": 7872887993,
+      "said": "Going to dm what is handy there?",
+      "chatId": 7872887993
+    },
+    {
+      "time": "2025-06-27T21:58:57.109Z",
+      "person": "Jeremy",
+      "personId": 7872887993,
+      "said": "Kannst du mir eine Liste geben von allen Sachen, die ich brauche",
+      "chatId": 7872887993
+    },
+    {
+      "time": "2025-06-27T21:59:21.148Z",
+      "person": "Jeremy",
+      "personId": 7872887993,
+      "said": "Ich hab’s Schlafzimmer aufgeräumt",
+      "chatId": 7872887993
+    },
+    {
+      "time": "2025-06-27T21:59:36.137Z",
+      "person": "Jeremy",
+      "personId": 7872887993,
+      "said": "Kannst du mir noch mal eine Liste von allem geben?",
+      "chatId": 7872887993
+    },
+    {
+      "time": "2025-06-27T22:00:20.652Z",
+      "person": "Jeremy",
+      "personId": 7872887993,
+      "said": "Kannst du alle Aufgaben löschen",
+      "chatId": 7872887993
+    },
+    {
+      "time": "2025-06-27T22:00:37.041Z",
+      "person": "Jeremy",
+      "personId": 7872887993,
+      "said": "Welche Aufgaben habe ich?",
+      "chatId": 7872887993
+    },
+    {
+      "time": "2025-06-27T22:00:47.766Z",
+      "person": "Jeremy",
+      "personId": 7872887993,
+      "said": "Liste mit allem",
+      "chatId": 7872887993
+    },
+    {
+      "time": "2025-06-27T22:01:12.830Z",
+      "person": "Jeremy",
+      "personId": 7872887993,
+      "said": "Moana muss saugen und ich muss mit Monti Gassi gehen und ich muss ein Eis holen",
+      "chatId": 7872887993
+    },
+    {
+      "time": "2025-06-27T22:01:29.244Z",
+      "person": "Jeremy",
+      "personId": 7872887993,
+      "said": "Kannst du mir eine Liste mit allen Aufgaben geben?",
+      "chatId": 7872887993
+    },
+    {
+      "time": "2025-06-27T22:03:36.318Z",
+      "person": "Jeremy",
+      "personId": 7872887993,
+      "said": "Kannst du alle Aufgaben löschen",
+      "chatId": 7872887993
+    },
+    {
+      "time": "2025-06-27T22:03:45.966Z",
+      "person": "Jeremy",
+      "personId": 7872887993,
+      "said": "Zeig die Liste",
       "chatId": 7872887993
     }
   ]
