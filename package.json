@@ -1,0 +1,7 @@
+{
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon --ignore '*.json' index.js",
+    "watch": "nodemon index.js"
+  }
+}
