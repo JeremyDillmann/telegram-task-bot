@@ -146,52 +146,45 @@ bot.on('message', async (msg) => {
   }
 });
 
-// --- ** NEW, "JAILBROKEN" AI BRAIN ** ---
+// --- ** AI BRAIN with EDITING capabilities ** ---
 async function processWithGrandmaWisdom(text, person, context, chatId) {
   const prompt = `
-You are a hyper-literal, rule-following assistant that converts natural language into a JSON object. You have two modes: Task Parsing and Operation Handling. You must follow all rules exactly.
+You are a hyper-literal, rule-following assistant that converts natural language into a JSON object. You have three modes: Task Parsing, Operation Handling, and Task Editing.
 
 --- PRIMARY RULES ---
-1.  **NO HALLUCINATIONS**: DO NOT add, infer, or assume any detail not present in the user's message. If a 'when' or 'where' is not specified, its value MUST be null.
-2.  **STAY IN CHARACTER**: Your "message" field must be extremely brief (3-10 words) and sound like a terse, direct grandma.
+1.  **NO HALLUCINATIONS**: DO NOT add or assume any detail not in the user's message. If a 'when' or 'where' is not specified, its value MUST be null.
+2.  **STAY IN CHARACTER**: Your "message" field must be extremely brief (3-10 words).
 3.  **JSON ONLY**: Your entire output must be a single, valid JSON object.
 
 --- MODE 1: TASK PARSING ---
-If the user's message is about creating new tasks, follow these steps:
-1.  **Deconstruct**: Break down long paragraphs (in English or German) into a list of individual, atomic tasks.
-2.  **Standardize**: Translate tasks into simple English titles. "Geschirrspüler ausräumen" -> "Unload the dishwasher".
-3.  **Apply Context**: A location (e.g., "in the kitchen") applies to all subsequent tasks until a new one is mentioned.
-4.  **Categorize**: Use 'shopping', 'cleaning', or 'general'.
-5.  **Confirmation**: For the "message" field, confirm the number of tasks added (e.g., "Got it. Added 8 tasks.").
+If the message is about creating new tasks, deconstruct it into a list of atomic tasks.
 
 --- MODE 2: OPERATION HANDLING ---
-If the user's message contains keywords for managing tasks, you MUST create an "operations" object.
-- **Operation Keywords**: "list", "show", "what do I need", "tell me", "was muss ich", "aufgaben", "erledigt", "done", "gekauft", "bought", "finished", "remove", "delete", "clear all", "alles löschen".
-- **Operation Rule**: If an operation keyword is detected, the "tasks" array in your JSON response MUST be empty.
-- **Your Response**: The "message" field should simply acknowledge the command (e.g., "Listing tasks.", "Okay, clearing everything.").
+If the message contains keywords for managing tasks, create an "operations" object. The "tasks" array MUST be empty.
+- **Operation Keywords**: "list", "show", "what do I need", "was muss ich", "erledigt", "done", "gekauft", "bought", "remove", "delete", "clear all", "alles löschen".
+- **Personal vs. All**: For 'list', detect if the user wants 'personal' or 'all' tasks.
+
+--- MODE 3: TASK EDITING ---
+If the message contains keywords for changing an existing task, create an "edit" operation.
+- **Edit Keywords**: "edit", "change", "update", "assign", "reschedule".
+- **Structure**: The operation must have a "target" (the task to change) and "details" (an object with the fields to update, e.g., {"who": "NewPerson", "when_text": "new time"}).
 
 --- EXAMPLES ---
 - User: "I need to clean the bathroom"
 - You produce: { "message": "Noted.", "tasks": [{ "title": "Clean the bathroom", "who": "${person}", "when_text": null, "where_text": null, "category": "cleaning" }], "operations": [] }
 
-- User: "was muss ich morgen bei edeka kaufen? ich brauche milch, brot und tomaten"
-- You produce: { "message": "Got it. Added 3 tasks.", "tasks": [
-    { "title": "Buy milk", "who": "${person}", "when_text": "morgen", "where_text": "edeka", "category": "shopping" },
-    { "title": "Buy bread", "who": "${person}", "when_text": "morgen", "where_text": "edeka", "category": "shopping" },
-    { "title": "Buy tomatoes", "who": "${person}", "when_text": "morgen", "where_text": "edeka", "category": "shopping" }
-  ], "operations": [] }
-
 - User: "Show me my tasks"
-- You produce: { "message": "Listing tasks.", "tasks": [], "operations": [{ "type": "list", "target": "all" }] }
+- You produce: { "message": "Here are your tasks.", "tasks": [], "operations": [{ "type": "list", "target": "personal" }] }
 
-- User: "Done with the dishes"
-- You produce: { "message": "Noted.", "tasks": [], "operations": [{ "type": "complete", "target": "dishes" }] }
+- User: "Change the task 'clean floor' to 'vacuum floor'"
+- You produce: { "message": "Updated.", "tasks": [], "operations": [{ "type": "edit", "target": "clean floor", "details": { "title": "vacuum floor" } }] }
+
+- User: "Assign 'take out trash' to Steve"
+- You produce: { "message": "Assigned.", "tasks": [], "operations": [{ "type": "edit", "target": "take out trash", "details": { "who": "Steve" } }] }
 
 --- CURRENT REQUEST ---
 - User: ${person}
 - Message: "${text}"
-- Conversation Context:
-${context}
 
 --- YOUR JSON RESPONSE ---
 `;
@@ -204,7 +197,7 @@ ${context}
         { role: "user", content: prompt }
       ],
       response_format: { type: "json_object" },
-      temperature: 0.1, // Lowered temperature to prevent creativity/hallucinations
+      temperature: 0.1,
       max_tokens: 2000,
     });
 
@@ -255,14 +248,66 @@ function processOperations(operations, person, chatId) {
     switch (op.type) {
       case 'complete': handleComplete(op.target, person, chatId); break;
       case 'remove': handleRemove(op.target, person, chatId); break;
-      case 'list': handleList(chatId); break;
+      case 'list': handleList(op.target, person, chatId); break;
       case 'clear_all': handleClearAll(person, chatId); break;
+      // ** NEW EDITING FUNCTIONALITY **
+      case 'edit': handleEdit(op.target, op.details, person, chatId); break; 
       default: bot.sendMessage(chatId, `I don't know how to do that.`); break;
     }
   }
 }
 
-// --- Operation Handlers (using DB queries) ---
+// --- ** OPERATION HANDLERS with EDIT Function ** ---
+
+// ** NEW: Handles editing of existing tasks **
+function handleEdit(target, details, person, chatId) {
+  if (!target || !details || Object.keys(details).length === 0) {
+    bot.sendMessage(chatId, "What do you want to change, and what should I change it to?");
+    return;
+  }
+
+  // First, find the task assigned to the user.
+  const task = db.prepare(`
+    SELECT id, title FROM tasks WHERE completed = 0 AND who = ? AND lower(title) LIKE ? LIMIT 1
+  `).get(person, `%${target.toLowerCase()}%`);
+
+  if (!task) {
+    bot.sendMessage(chatId, `I can't find the task "${target}" on your list to edit.`);
+    return;
+  }
+
+  // Dynamically build the UPDATE query
+  const validColumns = ['title', 'who', 'when_text', 'where_text', 'importance', 'category'];
+  const setParts = [];
+  const params = [];
+
+  for (const key in details) {
+    if (validColumns.includes(key)) {
+      setParts.push(`${key} = ?`);
+      params.push(details[key]);
+    }
+  }
+
+  if (setParts.length === 0) {
+    bot.sendMessage(chatId, "None of those are things I can change.");
+    return;
+  }
+  
+  params.push(task.id);
+  const query = `UPDATE tasks SET ${setParts.join(', ')} WHERE id = ?`;
+
+  try {
+    const result = db.prepare(query).run(...params);
+    if (result.changes > 0) {
+      bot.sendMessage(chatId, `Okay, I've updated the task.`);
+    } else {
+      bot.sendMessage(chatId, `Something went wrong, couldn't update the task.`);
+    }
+  } catch (err) {
+    console.error("Edit Error:", err);
+    bot.sendMessage(chatId, "I couldn't make that change.");
+  }
+}
 
 function handleClearAll(person, chatId) {
   const result = db.prepare(`
@@ -278,8 +323,8 @@ function handleComplete(target, person, chatId) {
       return;
   }
   const task = db.prepare(`
-    SELECT id, title FROM tasks WHERE completed = 0 AND lower(title) LIKE ? ORDER BY length(title) ASC LIMIT 1
-  `).get(`%${targetLower}%`);
+    SELECT id, title FROM tasks WHERE completed = 0 AND who = ? AND lower(title) LIKE ? ORDER BY length(title) ASC LIMIT 1
+  `).get(person, `%${targetLower}%`);
   
   if (task) {
     db.prepare(`
@@ -288,15 +333,25 @@ function handleComplete(target, person, chatId) {
     const responses = [`Done.`, `Good.`, `Next.`, `Noted.`, `Check.`];
     bot.sendMessage(chatId, responses[Math.floor(Math.random() * responses.length)]);
   } else {
-    bot.sendMessage(chatId, `Can't find a task like "${target}".`);
+    bot.sendMessage(chatId, `Can't find a task like "${target}" assigned to you.`);
   }
 }
 
-function handleList(chatId) {
-    const tasks = db.prepare("SELECT * FROM tasks WHERE completed = 0 ORDER BY category, importance DESC, where_text").all();
+function handleList(target, person, chatId) {
+    let query = "SELECT * FROM tasks WHERE completed = 0";
+    const params = [];
+
+    if (target === 'personal') {
+        query += " AND who = ?";
+        params.push(person);
+    }
+    
+    query += " ORDER BY category, importance DESC, where_text";
+    
+    const tasks = db.prepare(query).all(...params);
   
     if (tasks.length === 0) {
-      bot.sendMessage(chatId, `Nothing to do.`);
+      bot.sendMessage(chatId, target === 'personal' ? 'You have nothing to do.' : 'There are no tasks.');
       return;
     }
   
@@ -320,7 +375,6 @@ function handleList(chatId) {
     bot.sendMessage(chatId, message.trim());
 }
 
-
 function handleRemove(target, person, chatId) {
   const targetLower = target ? target.toLowerCase() : '';
   if (!targetLower) {
@@ -328,14 +382,14 @@ function handleRemove(target, person, chatId) {
       return;
   }
   const task = db.prepare(`
-    SELECT id, title FROM tasks WHERE completed = 0 AND lower(title) LIKE ? LIMIT 1
-  `).get(`%${targetLower}%`);
+    SELECT id, title FROM tasks WHERE completed = 0 AND who = ? AND lower(title) LIKE ? LIMIT 1
+  `).get(person, `%${targetLower}%`);
 
   if (task) {
     db.prepare('DELETE FROM tasks WHERE id = ?').run(task.id);
     bot.sendMessage(chatId, `Fine, ${person}. Removed "${task.title}".`);
   } else {
-    bot.sendMessage(chatId, `Can't find that one, ${person}.`);
+    bot.sendMessage(chatId, `Can't find that one on your list, ${person}.`);
   }
 }
 
