@@ -2,13 +2,12 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 
-// Proper bot initialization with webhook cleanup
+// Create bot instance (don't start polling yet)
 const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { 
-  polling: false,
-  filepath: false 
+  polling: false 
 });
 
-// Clean startup process
+// Initialize bot with proper error handling
 async function initBot() {
   try {
     // Clear any existing webhooks
@@ -18,13 +17,6 @@ async function initBot() {
     // Start polling
     await bot.startPolling();
     console.log('Bot polling started successfully');
-    
-    // Set bot commands for better UX
-    await bot.setMyCommands([
-      { command: 'list', description: 'Show your tasks' },
-      { command: 'all', description: 'Show all tasks' },
-      { command: 'help', description: 'Get help' }
-    ]);
     
     return bot;
   } catch (err) {

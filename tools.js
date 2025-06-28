@@ -4,7 +4,7 @@ const tools = [
       type: 'function',
       function: {
         name: 'createTasks',
-        description: 'Create new tasks ONLY when user explicitly wants to add tasks. NOT for questions or requests for suggestions.',
+        description: 'Neue Aufgaben erstellen. NUR wenn explizit neue Aufgaben genannt werden. NIEMALS für Fragen oder Vorschläge.',
         parameters: {
           type: 'object',
           properties: {
@@ -37,7 +37,7 @@ const tools = [
       type: 'function',
       function: {
         name: 'listTasks',
-        description: 'Show current tasks when user asks to see their list',
+        description: 'Aufgaben anzeigen wenn Nutzer die Liste sehen will',
         parameters: {
           type: 'object',
           properties: {
@@ -54,21 +54,21 @@ const tools = [
       type: 'function',
       function: {
         name: 'suggestTasks',
-        description: 'Suggest which tasks to do based on available time or context. Use when user asks for suggestions, recommendations, or what to do in X minutes.',
+        description: 'Aufgaben vorschlagen basierend auf Zeit oder Ort. Nutzen bei: "was kann ich machen", "bin bei X", "habe X Minuten"',
         parameters: {
           type: 'object',
           properties: {
             timeAvailable: { 
               type: 'number',
-              description: 'Minutes available (if mentioned)'
+              description: 'Verfügbare Minuten (wenn erwähnt)'
             },
             count: {
               type: 'number',
-              description: 'How many suggestions requested'
+              description: 'Anzahl gewünschter Vorschläge'
             },
             context: {
               type: 'string',
-              description: 'Any context like location or mood'
+              description: 'Kontext wie Ort oder Situation (z.B. "bei Edeka", "zu Hause")'
             }
           }
         }
@@ -78,13 +78,13 @@ const tools = [
       type: 'function',
       function: {
         name: 'editTask',
-        description: 'Edit or update an existing task. Use when user wants to change, rename, or modify a task.',
+        description: 'Aufgabe bearbeiten oder umbenennen. Nutzen bei: "ändere", "statt X bitte Y", "umbenennen"',
         parameters: {
           type: 'object',
           properties: {
             taskIdentifier: { 
               type: 'string',
-              description: 'Part of the current task title to identify it'
+              description: 'Teil des aktuellen Aufgabentitels'
             },
             updates: {
               type: 'object',
@@ -111,7 +111,7 @@ const tools = [
       type: 'function',
       function: {
         name: 'completeTasks',
-        description: 'Mark tasks as done',
+        description: 'Aufgaben als erledigt markieren',
         parameters: {
           type: 'object',
           properties: {
@@ -128,7 +128,7 @@ const tools = [
       type: 'function',
       function: {
         name: 'deleteTasks',
-        description: 'Delete tasks without completing them. Use when user wants to remove or delete tasks.',
+        description: 'Aufgaben löschen ohne sie zu erledigen. Nutzen bei: "lösche", "entferne", "weg"',
         parameters: {
           type: 'object',
           properties: {
@@ -145,7 +145,7 @@ const tools = [
       type: 'function',
       function: {
         name: 'clearAllTasks',
-        description: 'Clear all tasks',
+        description: 'Alle Aufgaben löschen',
         parameters: {
           type: 'object',
           properties: {}
@@ -156,7 +156,7 @@ const tools = [
       type: 'function',
       function: {
         name: 'respond',
-        description: 'General response when no task operation needed',
+        description: 'Allgemeine Antwort wenn keine Aufgabenverwaltung nötig',
         parameters: {
           type: 'object',
           properties: {
