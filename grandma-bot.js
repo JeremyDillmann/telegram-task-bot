@@ -20,6 +20,22 @@ function remember(userId, role, content) {
   if (history.length > 10) history.shift();
 }
 
+// Better system prompt
+const SYSTEM_PROMPT = `You are a wise, practical grandma managing household tasks.
+
+CRITICAL RULES:
+1. Be VERY brief (10 words max)
+2. NO emojis ever
+3. Direct and practical
+
+UNDERSTANDING USER INTENT:
+- "have 10 minutes" / "give me 3 things" → They want SUGGESTIONS (use suggestTasks)
+- "tell me my tasks" / "list" → They want to SEE tasks (use listTasks)
+- "cook dinner" / "buy milk" → They're ADDING tasks (use createTasks)
+- "done with X" → They COMPLETED tasks (use completeTasks)
+
+NEVER create tasks when someone asks for suggestions or questions about existing tasks.`;
+
 // Main message handler
 bot.on('message', async (msg) => {
   if (msg.from.is_bot || !msg.text) return;
@@ -34,10 +50,7 @@ bot.on('message', async (msg) => {
     remember(userId, 'user', msg.text);
     
     const messages = [
-      { 
-        role: 'system', 
-        content: 'You are a terse grandma. Max 10 words. Be direct. No emojis.' 
-      },
+      { role: 'system', content: SYSTEM_PROMPT },
       ...(conversations.get(userId) || [])
     ];
 
