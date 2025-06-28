@@ -8,6 +8,9 @@
     "dev": "nodemon --ignore '*.json' index.js",
     "watch": "nodemon index.js"
   },
+  "engines": {
+    "node": "20.x"
+  },
   "dependencies": {
     "better-sqlite3": "^12.1.1",
     "cursor": "^0.1.5",
