@@ -5,11 +5,11 @@ const fs = require('fs').promises;
 const path = require('path');
 const Database = require('better-sqlite3');
 
-// Initialize the database - This is the single source of truth now
+// Initialize the database - This is the single source of truth
 const db = new Database('grandma.db');
 console.log('Database connected successfully.');
 
-// Kill any existing bot instances first
+// Graceful shutdown
 process.on('SIGINT', () => {
   console.log('Shutting down gracefully...');
   db.close(); // Close the database connection
@@ -67,25 +67,22 @@ function initStorage() {
     );
   `);
   
-  // Ensure lastCleanup date exists
   const stmt = db.prepare(`INSERT OR IGNORE INTO knowledge (key, value) VALUES (?, ?)`);
   stmt.run('lastCleanup', new Date(0).toISOString());
   console.log('Database schema is ready.');
 }
 
-// --- Grandma's Memory System (Now with DB persistence) ---
+// --- Grandma's Memory System (DB-backed) ---
 class GrandmaMemory {
   constructor() {
     this.shortTermMemory = []; // In-memory cache for recent conversation
   }
 
-  // Load history from DB into memory on startup
   hydrate() {
     const rows = db.prepare(`
       SELECT person, said FROM conversation_history 
       ORDER BY timestamp DESC LIMIT 20
-    `).all().reverse(); // .reverse() to get chronological order
-
+    `).all().reverse();
     this.shortTermMemory = rows.map(r => ({ person: r.person, said: r.said }));
     console.log(`Hydrated ${this.shortTermMemory.length} messages into memory.`);
   }
@@ -99,13 +96,9 @@ class GrandmaMemory {
       chatId: msg.chat.id
     };
     
-    // Update in-memory cache
     this.shortTermMemory.push({ person: memory.person, said: memory.said });
-    if (this.shortTermMemory.length > 20) {
-      this.shortTermMemory.shift();
-    }
+    if (this.shortTermMemory.length > 20) this.shortTermMemory.shift();
     
-    // Persist to database
     const stmt = db.prepare(`
       INSERT INTO conversation_history (timestamp, person, personId, said, chatId)
       VALUES (?, ?, ?, ?, ?)
@@ -114,22 +107,7 @@ class GrandmaMemory {
   }
   
   getConversationContext() {
-    return this.shortTermMemory.slice(-10).map(m => 
-      `${m.person}: ${m.said}`
-    ).join('\n');
-  }
-
-  updateKnowledge(person, info) {
-    // For this simple case, we can store structured info as JSON in the knowledge table
-    const key = `person_${person}`;
-    const existing = db.prepare('SELECT value FROM knowledge WHERE key = ?').get(key);
-    const existingInfo = existing ? JSON.parse(existing.value) : {};
-    const newInfo = { ...existingInfo, ...info };
-    
-    db.prepare(`
-      INSERT INTO knowledge (key, value) VALUES (?, ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run(key, JSON.stringify(newInfo));
+    return this.shortTermMemory.slice(-10).map(m => `${m.person}: ${m.said}`).join('\n');
   }
 }
 
@@ -139,8 +117,7 @@ const grandma = new GrandmaMemory();
 
 // Main message handler
 bot.on('message', async (msg) => {
-  if (msg.from.is_bot) return;
-  if (!msg.text) return;
+  if (msg.from.is_bot || !msg.text) return;
   
   const chatId = msg.chat.id;
   const person = msg.from.first_name || msg.from.username || 'child';
@@ -149,7 +126,7 @@ bot.on('message', async (msg) => {
   
   try {
     bot.sendChatAction(chatId, 'typing');
-    const response = await processWithGrandmaWisdom(msg.text, person, grandma.getConversationContext());
+    const response = await processWithGrandmaWisdom(msg.text, person, grandma.getConversationContext(), chatId);
     
     if (response.message) {
       await bot.sendMessage(chatId, response.message);
@@ -165,16 +142,17 @@ bot.on('message', async (msg) => {
     
   } catch (error) {
     console.error('Grandma error:', error);
-    bot.sendMessage(chatId, `Try again.`);
+    bot.sendMessage(chatId, `Something went wrong. Try again.`);
   }
 });
 
-// Grandma's wisdom processor
-async function processWithGrandmaWisdom(text, person, context) {
+// --- ** NEW, UPGRADED AI BRAIN ** ---
+// This function parses complex natural language into a structured task list.
+async function processWithGrandmaWisdom(text, person, context, chatId) {
   const activeTasks = db.prepare('SELECT title, who, when_text, where_text FROM tasks WHERE completed = 0').all();
-  
+
   const prompt = `
-You are a wise, street-smart grandma who keeps an impeccable household. You're extremely brief and direct.
+You are a wise, street-smart grandma who is an expert at parsing natural language into a structured task list.
 
 RECENT CONVERSATION:
 ${context}
@@ -182,34 +160,47 @@ ${context}
 CURRENT MESSAGE from ${person}: "${text}"
 
 ACTIVE TASKS (${activeTasks.length} total):
-${activeTasks.slice(0, 10).map(t => 
-  `- ${t.title} (${t.who || 'someone'} needs to do this${t.when_text ? ' ' + t.when_text : ''}${t.where_text ? ' at ' + t.where_text : ''})`
+${activeTasks.slice(0, 10).map(t =>
+    `- ${t.title} (${t.who || 'someone'} needs to do this${t.when_text ? ' ' + t.when_text : ''}${t.where_text ? ' at ' + t.where_text : ''})`
 ).join('\n')}
 
-YOUR RULES:
-1. ULTRA BRIEF responses (5-10 words max)
-2. When adding tasks, just confirm briefly: "Got it." or "Noted."
-3. NO explanations, NO emojis, NO elaboration
-4. If "delete all" or "clear everything" → remove ALL tasks
-5. List formatting: use "|" between items
+--- YOUR INSTRUCTIONS ---
+1.  **Deconstruct the Message**: The user's message may be a long paragraph containing many distinct tasks, potentially in German or English. Your primary job is to break it down into a list of individual, actionable tasks.
+2.  **Apply Context**: If a location (e.g., "in the kitchen") is mentioned, apply it to all subsequent tasks until a new location is mentioned.
+3.  **Standardize Tasks**: Translate tasks into clear, simple English titles. For example, "die Geschirrspüler ausräumen" should become "Unload the dishwasher".
+4.  **Categorize**: Identify the category for each task. Use 'shopping' for buying items, 'cleaning' for chores, and 'general' for everything else.
+5.  **Minimal Response**: Your "message" field in the JSON should be an ultra-brief confirmation. If tasks were added, say "Got it. Added X tasks." or a similar brief phrase.
+6.  **Handle Operations**: If the user says "list", "done", "clear all", etc., create an operation object instead of a task.
 
-TASK EXTRACTION:
-Extract tasks with who/what/when/where but respond minimally. Note: 'when' and 'where' might be in the title itself.
-- Task 'title' is the 'what'.
-- 'when_text' is the time/day.
-- 'where_text' is the location.
+--- EXAMPLES ---
+- User says: "I need to get milk and bread from the store tomorrow, and also take out the trash."
+- You produce:
+  {
+    "message": "Okay, added 3 tasks.",
+    "tasks": [
+      { "title": "Get milk", "who": "${person}", "when_text": "tomorrow", "where_text": "the store", "category": "shopping" },
+      { "title": "Get bread", "who": "${person}", "when_text": "tomorrow", "where_text": "the store", "category": "shopping" },
+      { "title": "Take out the trash", "who": "${person}", "when_text": null, "where_text": null, "category": "cleaning" }
+    ],
+    "operations": []
+  }
+- User says (in German): "Also ich muss morgen den Eingang aufräumen und bei der Apotheke die Thermo Wasser Seife holen"
+- You produce:
+  {
+    "message": "Noted. Added 2 tasks.",
+    "tasks": [
+      { "title": "Tidy the entrance", "who": "${person}", "when_text": "morgen", "where_text": null, "category": "cleaning" },
+      { "title": "Get Thermo water soap", "who": "${person}", "when_text": null, "where_text": "Apotheke", "category": "shopping" }
+    ],
+    "operations": []
+  }
 
-OPERATIONS:
-- "done"/"bought"/"finished" → mark complete
-- "list"/"what's on" → show list
-- "delete all"/"clear everything" → remove ALL active tasks
-- "remove X" → remove specific task
-
-Respond as JSON only:
+--- YOUR RESPONSE (JSON ONLY) ---
+Based on the message from ${person}, provide your response in the following JSON format.
 {
   "message": "Your ULTRA brief response",
-  "tasks": [{"title": "...", "who": "...", "when_text": "...", "where_text": "...", "importance": "...", "category": "..."}],
-  "operations": [{"type": "...", "target": "...", "details": {...}}]
+  "tasks": [{"title": "...", "who": "...", "when_text": "...", "where_text": "...", "category": "..."}],
+  "operations": []
 }
 `;
 
@@ -217,36 +208,26 @@ Respond as JSON only:
     const completion = await openai.chat.completions.create({
       model: "gpt-4o",
       messages: [
-        { role: "system", content: "You are a terse grandma. Maximum 10 words per response. You only output valid JSON." },
+        { role: "system", content: "You are an expert task-parsing assistant. You only output valid JSON based on the user's request." },
         { role: "user", content: prompt }
       ],
-      response_format: { type: "json_object" }, // Use JSON mode for reliability
-      temperature: 0.3,
-      max_tokens: 400,
+      response_format: { type: "json_object" },
+      temperature: 0.2,
+      max_tokens: 1500,
     });
-    
+
     const response = completion.choices[0].message.content;
-    console.log('Grandma says (JSON):', response);
+    console.log('Grandma parsed (JSON):', response);
     return JSON.parse(response);
-    
+
   } catch (error) {
     console.error('AI Error:', error);
-    // Fallback logic remains the same
-    const lowerText = text.toLowerCase();
-    if (lowerText.includes('delete all') || lowerText.includes('clear everything')) {
-      return { message: `All cleared.`, tasks: [], operations: [{ type: 'clear_all' }] };
-    }
-    if (lowerText.includes('done') || lowerText.includes('bought')) {
-      return { message: `Noted.`, tasks: [], operations: [{ type: 'complete', target: text }] };
-    }
-    if (lowerText.includes('list') || lowerText.includes('what')) {
-      return { message: `Here:`, tasks: [], operations: [{ type: 'list' }] };
-    }
-    return { message: `Again?`, tasks: [], operations: [] };
+    bot.sendMessage(chatId, `I'm a bit confused, try again.`);
+    return { message: null, tasks: [], operations: [] };
   }
 }
 
-// Process new tasks using a transaction
+// Process new tasks using a database transaction
 function processTasks(newTasks, person) {
   const insert = db.prepare(`
     INSERT INTO tasks (title, who, when_text, where_text, importance, category, createdBy, createdAt)
@@ -255,7 +236,7 @@ function processTasks(newTasks, person) {
 
   const insertMany = db.transaction((tasks) => {
     for (const task of tasks) {
-        const taskRecord = {
+        insert.run({
             title: task.title,
             who: task.who || person,
             when: task.when_text || null,
@@ -264,8 +245,7 @@ function processTasks(newTasks, person) {
             category: task.category || 'general',
             createdBy: person,
             createdAt: new Date().toISOString()
-        };
-        insert.run(taskRecord);
+        });
     }
   });
 
@@ -294,30 +274,21 @@ function processOperations(operations, person, chatId) {
 
 function handleClearAll(person, chatId) {
   const result = db.prepare(`
-    UPDATE tasks 
-    SET completed = 1, completedAt = ?, completedBy = ? 
-    WHERE completed = 0
+    UPDATE tasks SET completed = 1, completedAt = ?, completedBy = ? WHERE completed = 0
   `).run(new Date().toISOString(), person);
-  
   bot.sendMessage(chatId, `Cleared ${result.changes} tasks.`);
 }
 
 function handleComplete(target, person, chatId) {
-  const targetLower = target.toLowerCase();
-  // Attempt a fuzzy match on the title
+  const targetLower = target ? target.toLowerCase().replace('done', '').replace('bought', '').trim() : '';
   const task = db.prepare(`
-    SELECT id, title FROM tasks 
-    WHERE completed = 0 AND lower(title) LIKE ? 
-    ORDER BY length(title) ASC LIMIT 1
-  `).get(`%${targetLower.replace('done', '').replace('bought', '').trim()}%`);
+    SELECT id, title FROM tasks WHERE completed = 0 AND lower(title) LIKE ? ORDER BY length(title) ASC LIMIT 1
+  `).get(`%${targetLower}%`);
   
   if (task) {
     db.prepare(`
-      UPDATE tasks 
-      SET completed = 1, completedAt = ?, completedBy = ? 
-      WHERE id = ?
+      UPDATE tasks SET completed = 1, completedAt = ?, completedBy = ? WHERE id = ?
     `).run(new Date().toISOString(), person, task.id);
-    
     const responses = [`Done.`, `Good.`, `Next.`, `Noted.`, `Check.`];
     bot.sendMessage(chatId, responses[Math.floor(Math.random() * responses.length)]);
   } else {
@@ -326,53 +297,46 @@ function handleComplete(target, person, chatId) {
 }
 
 function handleList(chatId) {
-  const urgent = db.prepare("SELECT * FROM tasks WHERE completed = 0 AND importance = 'urgent'").all();
-  const shopping = db.prepare("SELECT * FROM tasks WHERE completed = 0 AND category = 'shopping'").all();
-  const regular = db.prepare("SELECT * FROM tasks WHERE completed = 0 AND importance != 'urgent' AND category != 'shopping'").all();
-  
-  if (urgent.length === 0 && shopping.length === 0 && regular.length === 0) {
+  const tasks = db.prepare("SELECT * FROM tasks WHERE completed = 0 ORDER BY category, importance DESC").all();
+
+  if (tasks.length === 0) {
     bot.sendMessage(chatId, `Nothing to do.`);
     return;
   }
-  
+
+  // Group tasks by category for structured output
+  const grouped = tasks.reduce((acc, t) => {
+    let category = t.category.toUpperCase();
+    if (t.importance === 'urgent') category = 'URGENT';
+    if (!acc[category]) acc[category] = [];
+    acc[category].push(t);
+    return acc;
+  }, {});
+
   let message = '';
-  
-  if (urgent.length > 0) {
-    message += 'URGENT:\n';
-    urgent.forEach(t => message += `${t.title} | ${t.who}${t.when_text ? ' | ' + t.when_text : ''}\n`);
-    message += '\n';
-  }
-  
-  if (shopping.length > 0) {
-    const byStore = shopping.reduce((acc, t) => {
-        const store = t.where_text || 'General Shopping';
-        if (!acc[store]) acc[store] = [];
-        acc[store].push(t);
-        return acc;
-    }, {});
-    
-    message += 'SHOPPING:\n';
-    for (const [store, items] of Object.entries(byStore)) {
-      message += `${store}:\n`;
-      items.forEach(t => message += `  ${t.title} | ${t.who}\n`);
+  const categoryOrder = ['URGENT', 'SHOPPING', 'CLEANING', 'GENERAL'];
+
+  for (const category of categoryOrder) {
+    if (grouped[category]) {
+      message += `${category}:\n`;
+      grouped[category].forEach(t => {
+        let details = [t.who];
+        if (t.when_text) details.push(t.when_text);
+        if (t.where_text && category !== 'SHOPPING') details.push(`at ${t.where_text}`);
+        message += `- ${t.title} (${details.join(' | ')})\n`;
+      });
+      message += '\n';
     }
-    message += '\n';
   }
-  
-  if (regular.length > 0) {
-    message += 'TASKS:\n';
-    regular.forEach(t => message += `${t.title} | ${t.who}${t.when_text ? ' | ' + t.when_text : ''}\n`);
-  }
-  
+
   bot.sendMessage(chatId, message.trim());
 }
 
+
 function handleRemove(target, person, chatId) {
-  const targetLower = target.toLowerCase();
+  const targetLower = target ? target.toLowerCase() : '';
   const task = db.prepare(`
-    SELECT id, title FROM tasks 
-    WHERE completed = 0 AND lower(title) LIKE ? 
-    LIMIT 1
+    SELECT id, title FROM tasks WHERE completed = 0 AND lower(title) LIKE ? LIMIT 1
   `).get(`%${targetLower}%`);
 
   if (task) {
@@ -414,9 +378,8 @@ async function monthlyCleanup() {
 
 // Voice message handler
 bot.on('voice', async (msg) => {
-  const chatId = msg.chat.id;
   const person = msg.from.first_name || msg.from.username;
-  bot.sendMessage(chatId, `${person}, I'm too old for voice messages. Type it out.`);
+  bot.sendMessage(msg.chat.id, `${person}, I'm too old for voice messages. Type it out.`);
 });
 
 // --- Startup Sequence ---
@@ -424,7 +387,6 @@ try {
   initStorage();
   grandma.hydrate();
   
-  // Set up daily cleanup check
   setInterval(monthlyCleanup, 24 * 60 * 60 * 1000); // Check daily
   monthlyCleanup(); // Run once on start
   
@@ -435,5 +397,5 @@ try {
 }
 
 // Error handling
-bot.on('polling_error', (error) => console.error('Telegram error:', error.code));
+bot.on('polling_error', (error) => console.error('Telegram polling error:', error));
 process.on('unhandledRejection', (reason, promise) => console.error('Unhandled Rejection:', reason));
