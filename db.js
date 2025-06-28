@@ -15,7 +15,11 @@ const db = new Database(path.join(dataDir, 'grandma.db'));
 // Enable better performance
 db.pragma('journal_mode = WAL');
 
-// Create tables immediately
+// Drop old tables if they exist to ensure clean schema
+db.exec(`DROP TABLE IF EXISTS tasks_old`);
+db.exec(`DROP TABLE IF EXISTS conversations_old`);
+
+// Create tables with unique constraint
 db.exec(`
   CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -29,7 +33,8 @@ db.exec(`
     createdAt TEXT NOT NULL,
     completed INTEGER DEFAULT 0,
     completedAt TEXT,
-    completedBy TEXT
+    completedBy TEXT,
+    UNIQUE(title, who, completed)
   )
 `);
 
@@ -52,7 +57,7 @@ db.exec(`
   ON conversations(userId, timestamp);
 `);
 
-console.log('Database initialized');
+console.log('Database initialized with unique constraints');
 
 // Export database
 module.exports = { db };

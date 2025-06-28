@@ -20,47 +20,33 @@ function remember(userId, role, content) {
   if (history.length > 10) history.shift();
 }
 
-// NEU: Verbesserter System Prompt
-const SYSTEM_PROMPT = `Du bist eine weise, praktische Oma, die Haushaltsaufgaben verwaltet.
+// Simplified and more explicit system prompt
+const SYSTEM_PROMPT = `Du bist eine Aufgabenverwaltung. Kurze Antworten (max 10 Wörter).
 
-WICHTIGE REGELN:
-1. Sei SEHR kurz (maximal 10-15 Wörter)
-2. NIEMALS Emojis in Antworten verwenden
-3. Direkt und praktisch antworten
-4. Immer auf Deutsch antworten
+WICHTIGSTE REGEL: Bei "umbenennen", "statt X bitte Y", "ändere X zu Y" IMMER editTask verwenden, NIEMALS createTasks!
 
-MULTI-TASK ERKENNUNG:
-Wenn Text mehrere Aufgaben enthält, IMMER aufteilen:
-- Bei "und", ",", "dann", "außerdem", "sowie" → separate Aufgaben
-- "Müll raus und Küche putzen" → 2 Aufgaben: ["Müll raus", "Küche putzen"]
-- "bei Edeka Milch, Brot und Käse" → 1 Aufgabe: "Milch, Brot, Käse" mit where_text="Edeka"
-- "Wohnzimmer und Schlafzimmer saugen" → 2 Aufgaben: ["Wohnzimmer saugen", "Schlafzimmer saugen"]
+PARSING REGELN:
+- "Saugroboter aktivieren" = 1 Aufgabe (NICHT aufteilen)
+- "Saugroboter für Wohnzimmer und Küche" = 1 Aufgabe: "Saugroboter aktivieren"
+- "Eingang und Wohnzimmer aufräumen" = 2 Aufgaben: ["Eingang aufräumen", "Wohnzimmer aufräumen"]
+- Bei Listen mit "und", ",": Trenne nur bei unterschiedlichen Tätigkeiten
+- KEINE Duplikate oder Varianten erstellen!
 
-BENUTZERABSICHTEN VERSTEHEN:
-- "habe 10 Minuten" / "was kann ich machen" / "bin bei Edeka" → Will VORSCHLÄGE (nutze suggestTasks mit context)
-- "zeige Aufgaben" / "liste" / "was steht an" → Will Aufgaben SEHEN (nutze listTasks)
-- "Müll rausbringen" / "Milch kaufen" / Listen von Aufgaben → Will Aufgaben HINZUFÜGEN (nutze createTasks)
-- "fertig mit X" / "X erledigt" / "Edeka fertig" → Hat Aufgaben ERLEDIGT (nutze completeTasks)
-- "ändere X zu Y" / "statt X bitte Y" → Will BEARBEITEN (nutze editTask)
-- "lösche X" / "X weg" → Will LÖSCHEN (nutze deleteTasks)
+BEFEHLE ERKENNEN:
+1. Neue Aufgaben → createTasks (nur bei wirklich NEUEN Aufgaben)
+2. "umbenennen/statt/ändere" → editTask (NIE createTasks!)
+3. "zeige/liste" → listTasks
+4. "fertig/erledigt" → completeTasks
+5. "was kann ich machen/bin bei X" → suggestTasks
+6. "lösche/weg" → deleteTasks
 
-KONTEXT-COMPLETION ERKENNEN:
-- "Edeka fertig" / "Edeka erledigt" → Alle Edeka-Aufgaben erledigen
-- "Küche fertig" → Alle Küchen-Aufgaben erledigen
-- "alles sauber" → Alle Putz-Aufgaben erledigen
+KONTEXT-COMPLETION:
+- "Edeka fertig" = Alle Edeka-Aufgaben erledigen
+- "Küche fertig" = Alle Küchen-Aufgaben erledigen
 
-ORT-ERKENNUNG:
-- "bin bei Edeka" → suggestTasks mit context="bei Edeka"
-- "bin zu Hause" → suggestTasks mit context="zu Hause"
-- "bin in der Stadt" → suggestTasks mit context="in der Stadt"
-
-KATEGORIEN ZUORDNEN:
-- shopping: DM, Edeka, Apotheke, Supermarkt, einkaufen
-- household: putzen, aufräumen, saugen, wischen, Müll
-- work: Büro, Arbeit, Meeting, Report
-- personal: Sport, Arzt, Friseur
-
-NIE die Liste zeigen, wenn eine andere Aktion gewünscht wird!`;
+KATEGORIEN:
+- shopping: Edeka, DM, Apotheke, einkaufen
+- household: putzen, aufräumen, saugen, Müll`;
 
 // Main message handler
 bot.on('message', async (msg) => {
@@ -81,11 +67,11 @@ bot.on('message', async (msg) => {
     ];
 
     const response = await openai.chat.completions.create({
-      model: 'gpt-4o',
+      model: 'gpt-4o-mini', // Changed to mini for better structure
       messages: messages,
       tools: tools,
       tool_choice: 'auto',
-      temperature: 0.5, // Erhöht für besseres Sprachverständnis
+      temperature: 0.2, // Lower for consistency
       max_tokens: 150
     });
 
@@ -100,7 +86,7 @@ bot.on('message', async (msg) => {
         const functionName = toolCall.function.name;
         const functionArgs = JSON.parse(toolCall.function.arguments);
         
-        console.log(`Calling ${functionName}:`, functionArgs);
+        console.log(`Calling ${functionName}:`, JSON.stringify(functionArgs, null, 2));
         
         if (handlers[functionName]) {
           await handlers[functionName](functionArgs, person, chatId);
@@ -128,7 +114,7 @@ process.on('SIGINT', async () => {
 async function start() {
   try {
     await initBot();
-    console.log('Oma Bot V2 ist bereit!');
+    console.log('Oma Bot V3 ist bereit!');
   } catch (err) {
     console.error('Failed to start:', err);
     process.exit(1);

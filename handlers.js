@@ -17,42 +17,78 @@ function estimateTaskDuration(title) {
   return 15; // Default
 }
 
+// Helper für Task-Normalisierung
+function normalizeTask(title) {
+  return title
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/saugroboter.*küche.*aktivieren|saugroboter.*aktivieren.*küche/gi, 'Saugroboter Küche aktivieren')
+    .replace(/saugroboter.*wohnzimmer.*aktivieren|saugroboter.*aktivieren.*wohnzimmer/gi, 'Saugroboter Wohnzimmer aktivieren')
+    .replace(/saugroboter\s+aktivieren$/gi, 'Saugroboter aktivieren');
+}
+
 const handlers = {
   createTasks({ tasks }, person, chatId) {
     try {
-      let added = 0;
-      const stmt = db.prepare(`
-        INSERT INTO tasks (title, who, when_text, where_text, importance, category, createdBy, createdAt) 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `);
+      // Dedupliziere und normalisiere Tasks
+      const uniqueTasks = [];
+      const seen = new Set();
+      
+      // Hole existierende Tasks für bessere Duplikat-Erkennung
+      const existingTasks = db.prepare(`
+        SELECT title FROM tasks 
+        WHERE who = ? AND completed = 0
+      `).all(person);
+      
+      const existingTitles = new Set(existingTasks.map(t => t.title.toLowerCase()));
       
       for (const task of tasks) {
-        try {
-          stmt.run(
-            task.title,
-            person,
-            task.when_text || null,
-            task.where_text || null,
-            task.importance || 'normal',
-            task.category || 'general',
-            person,
-            new Date().toISOString()
-          );
-          added++;
-        } catch (err) {
-          console.log('Skipping duplicate task');
+        const normalizedTitle = normalizeTask(task.title);
+        const key = normalizedTitle.toLowerCase();
+        
+        if (!seen.has(key) && !existingTitles.has(key)) {
+          seen.add(key);
+          uniqueTasks.push({
+            ...task,
+            title: normalizedTitle
+          });
         }
       }
       
-      // Verbesserte Antworten
-      if (added === 1) {
-        bot.sendMessage(chatId, `Gemerkt: ${tasks[0].title}`);
-      } else if (added > 1 && added <= 5) {
-        bot.sendMessage(chatId, `${added} neue dabei`);
-      } else if (added > 5) {
-        bot.sendMessage(chatId, `Uff, ${added} Sachen! Soll ich priorisieren?`);
-      } else {
+      if (uniqueTasks.length === 0) {
         bot.sendMessage(chatId, "Hab ich schon.");
+        return;
+      }
+      
+      let added = 0;
+      const stmt = db.prepare(`
+        INSERT OR IGNORE INTO tasks (title, who, when_text, where_text, importance, category, createdBy, createdAt) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      
+      for (const task of uniqueTasks) {
+        const result = stmt.run(
+          task.title,
+          person,
+          task.when_text || null,
+          task.where_text || null,
+          task.importance || 'normal',
+          task.category || 'general',
+          person,
+          new Date().toISOString()
+        );
+        if (result.changes > 0) added++;
+      }
+      
+      // Verbesserte Antworten
+      if (added === 0) {
+        bot.sendMessage(chatId, "Hab ich schon.");
+      } else if (added === 1) {
+        bot.sendMessage(chatId, `Gemerkt: ${uniqueTasks[0].title}`);
+      } else if (added <= 5) {
+        bot.sendMessage(chatId, `${added} neue dabei`);
+      } else {
+        bot.sendMessage(chatId, `${added} Aufgaben gespeichert`);
       }
     } catch (err) {
       console.error('Create error:', err);
@@ -116,7 +152,7 @@ const handlers = {
       let query = 'SELECT * FROM tasks WHERE completed = 0 AND who = ?';
       const params = [person];
       
-      // NEU: Location-based filtering
+      // Location-based filtering
       if (context && context.toLowerCase().includes('bei ')) {
         const location = context.toLowerCase().replace('bei ', '').trim();
         query += ' AND (where_text LIKE ? OR title LIKE ?)';
@@ -170,7 +206,7 @@ const handlers = {
         
         let message = `${timeAvailable} Min reichen für:\n`;
         suggestions.forEach(task => {
-          message += `✓ ${task.title} (${task.duration || '?'} Min)\n`;
+          message += `✓ ${task.title} (~${task.duration || '?'} Min)\n`;
         });
         
         bot.sendMessage(chatId, message.trim());
@@ -192,7 +228,7 @@ const handlers = {
 
   editTask({ taskIdentifier, updates }, person, chatId) {
     try {
-      // First find the task
+      // Find the task
       const findStmt = db.prepare(`
         SELECT * FROM tasks 
         WHERE completed = 0 AND who = ? AND title LIKE ?
@@ -202,7 +238,7 @@ const handlers = {
       const task = findStmt.get(person, `%${taskIdentifier}%`);
       
       if (!task) {
-        // NEU: Disambiguation
+        // Disambiguation
         const similar = db.prepare(`
           SELECT title FROM tasks 
           WHERE completed = 0 AND who = ?
@@ -226,7 +262,7 @@ const handlers = {
       
       if (updates.newTitle) {
         updateFields.push('title = ?');
-        params.push(updates.newTitle);
+        params.push(normalizeTask(updates.newTitle));
       }
       if (updates.newWhen !== undefined) {
         updateFields.push('when_text = ?');
@@ -277,47 +313,53 @@ const handlers = {
       let completedTitles = [];
       
       for (const identifier of taskIdentifiers) {
-        // NEU: Context-aware completion
+        // Context-aware completion
         if (identifier.toLowerCase().includes('edeka') && 
             (identifier.toLowerCase().includes('zeug') || 
              identifier.toLowerCase().includes('sachen') ||
              identifier.toLowerCase().includes('alles'))) {
           // Complete ALL Edeka tasks
+          const tasks = db.prepare(`
+            SELECT id, title FROM tasks 
+            WHERE completed = 0 AND who = ? 
+            AND (where_text LIKE '%Edeka%' OR title LIKE '%Edeka%')
+          `).all(person);
+          
           const stmt = db.prepare(`
             UPDATE tasks 
             SET completed = 1, completedAt = ?, completedBy = ? 
-            WHERE completed = 0 AND who = ? 
-            AND (where_text LIKE '%Edeka%' OR title LIKE '%Edeka%')
+            WHERE id = ?
           `);
           
-          const result = stmt.run(
-            new Date().toISOString(),
-            person,
-            person
-          );
+          for (const task of tasks) {
+            stmt.run(new Date().toISOString(), person, task.id);
+            completed++;
+          }
           
-          if (result.changes > 0) {
-            completed += result.changes;
-            completedTitles.push(`Edeka erledigt (${result.changes} Sachen)`);
+          if (tasks.length > 0) {
+            completedTitles.push(`Edeka erledigt (${tasks.length} Sachen)`);
           }
         } else if (identifier.toLowerCase() === 'küche fertig' ||
                    identifier.toLowerCase() === 'küche') {
           // Complete all kitchen tasks
+          const tasks = db.prepare(`
+            SELECT id, title FROM tasks 
+            WHERE completed = 0 AND who = ? 
+            AND (title LIKE '%küche%' OR title LIKE '%geschirr%' OR title LIKE '%spül%')
+          `).all(person);
+          
           const stmt = db.prepare(`
             UPDATE tasks 
             SET completed = 1, completedAt = ?, completedBy = ? 
-            WHERE completed = 0 AND who = ? 
-            AND (title LIKE '%küche%' OR title LIKE '%geschirr%' OR title LIKE '%spül%')
+            WHERE id = ?
           `);
           
-          const result = stmt.run(
-            new Date().toISOString(),
-            person,
-            person
-          );
+          for (const task of tasks) {
+            stmt.run(new Date().toISOString(), person, task.id);
+            completed++;
+          }
           
-          if (result.changes > 0) {
-            completed += result.changes;
+          if (tasks.length > 0) {
             completedTitles.push('Küche fertig! 🎉');
           }
         } else {
@@ -337,15 +379,13 @@ const handlers = {
           
           if (result.changes > 0) {
             completed++;
-            // Get the actual task title
-            const task = db.prepare('SELECT title FROM tasks WHERE id = ?').get(result.lastInsertRowid);
-            if (task) completedTitles.push(task.title);
+            completedTitles.push(identifier);
           }
         }
       }
       
       if (completed === 0) {
-        // NEU: Better disambiguation
+        // Better disambiguation
         const firstIdentifier = taskIdentifiers[0];
         const similar = db.prepare(`
           SELECT title FROM tasks 
@@ -388,7 +428,7 @@ const handlers = {
       }
       
       if (deleted === 0) {
-        // NEU: Disambiguation
+        // Disambiguation
         const firstIdentifier = taskIdentifiers[0];
         const similar = db.prepare(`
           SELECT title FROM tasks 

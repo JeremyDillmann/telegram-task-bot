@@ -4,7 +4,7 @@ const tools = [
       type: 'function',
       function: {
         name: 'createTasks',
-        description: 'Neue Aufgaben erstellen. NUR wenn explizit neue Aufgaben genannt werden. NIEMALS für Fragen oder Vorschläge.',
+        description: 'Neue Aufgaben erstellen. NUR wenn explizit neue Aufgaben genannt werden. NIEMALS bei "umbenennen" oder "statt X bitte Y" verwenden!',
         parameters: {
           type: 'object',
           properties: {
@@ -78,7 +78,7 @@ const tools = [
       type: 'function',
       function: {
         name: 'editTask',
-        description: 'Aufgabe bearbeiten oder umbenennen. Nutzen bei: "ändere", "statt X bitte Y", "umbenennen"',
+        description: 'Aufgabe bearbeiten oder umbenennen. IMMER nutzen bei: "ändere", "statt X bitte Y", "umbenennen", "X heißt jetzt Y"',
         parameters: {
           type: 'object',
           properties: {
